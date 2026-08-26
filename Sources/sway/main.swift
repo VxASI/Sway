@@ -22,6 +22,7 @@ func printUsage() {
     RECORD OPTIONS:
       --output <path>            bundle path (default: ~/Movies/Sway/<date>.sway)
       --display <id>             CGDirectDisplayID to capture (default: main)
+      --window <id>              CGWindowID to capture instead of a display
       --fps <n>                  capture frame rate (default: 60)
       --no-audio                 skip system audio
       --duration <seconds>       stop automatically after N seconds
@@ -136,7 +137,8 @@ case "record":
     let bundleURL = value(for: "--output").map { URL(fileURLWithPath: $0) } ?? defaultBundleURL()
     var options = ScreenRecorderOptions()
     if let fps = value(for: "--fps").flatMap(Int.init) { options.frameRate = fps }
-    if let display = value(for: "--display").flatMap(UInt32.init) { options.displayID = display }
+    if let display = value(for: "--display").flatMap(UInt32.init) { options.target = .display(display) }
+    if let window = value(for: "--window").flatMap(UInt32.init) { options.target = .window(window) }
     if arguments.contains("--no-audio") { options.capturesSystemAudio = false }
     let autoStop = value(for: "--duration").flatMap(Double.init)
 
@@ -160,8 +162,8 @@ case "record":
                     }
                 }
             }
-            let project = try await session.stop()
-            print("saved \(String(format: "%.2f", project.duration))s to \(bundleURL.path)")
+            let result = try await session.stop()
+            print("saved \(String(format: "%.2f", result.project.duration))s to \(bundleURL.path)")
             try summarize(bundleAt: bundleURL.path)
         } catch {
             FileHandle.standardError.write(Data("sway: \(error)\n".utf8))

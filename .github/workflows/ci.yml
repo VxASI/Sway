@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS build, test and app bundle
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Test
+        run: swift test
+
+      - name: Package Sway.app
+        run: ./Scripts/package-app.sh release
+
+      - name: Verify app bundle
+        run: |
+          set -euo pipefail
+          test -x .build/Sway.app/Contents/MacOS/Sway
+          test -f .build/Sway.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' .build/Sway.app/Contents/Info.plist
+          codesign --verify --verbose .build/Sway.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sway.app
+          path: .build/Sway.app
+
+  linux:
+    name: Linux SwayCore tests
+    runs-on: ubuntu-latest
+    container: swift:5.10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test SwayCore
+        run: swift test

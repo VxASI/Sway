@@ -3,6 +3,27 @@ import AVFoundation
 import Foundation
 import SwayCore
 
+/// Everything the editor needs after a recording, without re-reading the
+/// bundle from disk.
+public struct RecordingResult {
+    public let bundle: SwayProjectBundle
+    public let project: SwayProject
+    public let track: CursorTrack
+    public let edit: SwayEdit
+
+    public init(
+        bundle: SwayProjectBundle,
+        project: SwayProject,
+        track: CursorTrack,
+        edit: SwayEdit
+    ) {
+        self.bundle = bundle
+        self.project = project
+        self.track = track
+        self.edit = edit
+    }
+}
+
 /// Drives one recording end to end: starts the shared timebase, the screen
 /// capture and the cursor tracker together, then writes a `.sway` bundle and
 /// generates the camera path once recording stops.
@@ -52,10 +73,16 @@ public final class RecordingSession {
         self.tracker = tracker
     }
 
-    /// Stops capture, writes `project.json`, `cursor.json` and `camera.json`,
-    /// and returns the finished project.
+    /// Seconds since capture started, for the recording control's timer.
+    public var elapsed: TimeInterval {
+        bridge?.timebase.elapsed() ?? 0
+    }
+
+    /// Stops capture and writes `project.json`, `cursor.json`, `edit.json` and
+    /// `camera.json`. The camera path comes from the focus range in the initial
+    /// edit, which is what the editor then lets the user move.
     @discardableResult
-    public func stop() async throws -> SwayProject {
+    public func stop() async throws -> RecordingResult {
         guard let recorder, let tracker, let bridge else {
             throw ScreenRecordingError.notRecording
         }
@@ -75,7 +102,8 @@ public final class RecordingSession {
             }
             .filter { $0.time >= 0 && (duration <= 0 || $0.time <= duration) }
 
-        let camera = cameraGenerator.generate(track: track, duration: duration)
+        let edit = SwayEdit.initial(duration: duration, track: track)
+        let camera = cameraGenerator.generate(track: track, duration: duration, focus: edit.focus)
         let geometry = recorder.geometry ?? CaptureGeometry(
             displayID: 0, x: 0, y: 0, width: 0, height: 0, pixelWidth: 0, pixelHeight: 0
         )
@@ -87,11 +115,12 @@ public final class RecordingSession {
             startHostSeconds: bridge.timebase.startSeconds
         )
         try bundle.write(project: project, track: track, camera: camera)
+        try bundle.write(edit: edit)
 
         self.recorder = nil
         self.tracker = nil
         self.bridge = nil
-        return project
+        return RecordingResult(bundle: bundle, project: project, track: track, edit: edit)
     }
 }
 #endif

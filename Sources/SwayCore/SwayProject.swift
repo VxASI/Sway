@@ -58,6 +58,7 @@ public struct SwayProjectBundle {
     public static let videoFileName = "screen.mov"
     public static let cursorFileName = "cursor.json"
     public static let cameraFileName = "camera.json"
+    public static let editFileName = "edit.json"
     public static let pathExtension = "sway"
 
     public let url: URL
@@ -70,6 +71,7 @@ public struct SwayProjectBundle {
     public var projectURL: URL { url.appendingPathComponent(SwayProjectBundle.projectFileName) }
     public var cursorURL: URL { url.appendingPathComponent(SwayProjectBundle.cursorFileName) }
     public var cameraURL: URL { url.appendingPathComponent(SwayProjectBundle.cameraFileName) }
+    public var editURL: URL { url.appendingPathComponent(SwayProjectBundle.editFileName) }
 
     @discardableResult
     public func createDirectory() throws -> URL {
@@ -101,5 +103,21 @@ public struct SwayProjectBundle {
 
     public func readCameraPath() throws -> CameraPath {
         try JSONDecoder().decode(CameraPath.self, from: Data(contentsOf: cameraURL))
+    }
+
+    public func write(edit: SwayEdit) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(edit).write(to: editURL, options: .atomic)
+    }
+
+    public func readEdit() throws -> SwayEdit {
+        try JSONDecoder().decode(SwayEdit.self, from: Data(contentsOf: editURL))
+    }
+
+    public func write(camera: CameraPath) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(camera).write(to: cameraURL, options: .atomic)
     }
 }

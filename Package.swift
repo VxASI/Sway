@@ -16,3 +16,13 @@ let package = Package(
         .testTarget(name: "SwayCoreTests", dependencies: ["SwayCore"])
     ]
 )
+
+#if os(macOS)
+// The SwiftUI app is AppKit/ScreenCaptureKit only, so it is not part of the
+// package on other hosts (SwayCore still builds and tests anywhere).
+// Scripts/package-app.sh wraps this executable into a clickable Sway.app.
+package.products.append(.executable(name: "SwayApp", targets: ["SwayApp"]))
+package.targets.append(
+    .executableTarget(name: "SwayApp", dependencies: ["SwayCore", "SwayCapture"])
+)
+#endif

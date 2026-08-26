@@ -8,6 +8,7 @@ import SwayCore
 public enum ScreenRecordingError: Error, CustomStringConvertible {
     case noDisplayAvailable
     case displayNotFound(UInt32)
+    case windowNotFound(UInt32)
     case writerSetupFailed(String)
     case notRecording
 
@@ -17,6 +18,8 @@ public enum ScreenRecordingError: Error, CustomStringConvertible {
             return "No capturable display was returned by ScreenCaptureKit."
         case .displayNotFound(let id):
             return "Display \(id) is not available for capture."
+        case .windowNotFound(let id):
+            return "Window \(id) is not available for capture; it may have been closed."
         case .writerSetupFailed(let reason):
             return "Could not set up the movie writer: \(reason)"
         case .notRecording:
@@ -25,28 +28,43 @@ public enum ScreenRecordingError: Error, CustomStringConvertible {
     }
 }
 
+/// What the recorder points at: one whole display, or one window wherever it
+/// happens to be.
+public enum CaptureTarget: Sendable, Equatable {
+    /// `nil` picks the main display.
+    case display(UInt32?)
+    case window(CGWindowID)
+
+    public static let mainDisplay = CaptureTarget.display(nil)
+}
+
 public struct ScreenRecorderOptions: Sendable {
-    /// Display to capture. `nil` picks the main display.
-    public var displayID: UInt32?
+    public var target: CaptureTarget
     /// Region to capture, in global points (top-left origin). `nil` captures
-    /// the whole display. Region capture requires macOS 14.
+    /// the whole display. Ignored for window capture; requires macOS 14.
     public var region: CGRect?
     public var frameRate: Int
     public var capturesSystemAudio: Bool
+    /// Applications kept out of the capture, by bundle identifier. Sway passes
+    /// its own identifier so the picker and the recording control never end up
+    /// in the recording.
+    public var excludedBundleIdentifiers: [String]
     /// Codec used for the screen track.
     public var codec: AVVideoCodecType
 
     public init(
-        displayID: UInt32? = nil,
+        target: CaptureTarget = .mainDisplay,
         region: CGRect? = nil,
         frameRate: Int = 60,
         capturesSystemAudio: Bool = true,
+        excludedBundleIdentifiers: [String] = [],
         codec: AVVideoCodecType = .h264
     ) {
-        self.displayID = displayID
+        self.target = target
         self.region = region
         self.frameRate = frameRate
         self.capturesSystemAudio = capturesSystemAudio
+        self.excludedBundleIdentifiers = excludedBundleIdentifiers
         self.codec = codec
     }
 }
@@ -89,30 +107,55 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
             false,
             onScreenWindowsOnly: true
         )
+
+        let filter: SCContentFilter
         let display: SCDisplay
-        if let displayID = options.displayID {
-            guard let match = content.displays.first(where: { $0.displayID == displayID }) else {
-                throw ScreenRecordingError.displayNotFound(displayID)
+        var captureRect: CGRect
+
+        switch options.target {
+        case .window(let windowID):
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                throw ScreenRecordingError.windowNotFound(windowID)
             }
-            display = match
-        } else {
-            guard let main = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
-                ?? content.displays.first else {
-                throw ScreenRecordingError.noDisplayAvailable
+            display = try ScreenRecorder.display(containing: window.frame, in: content)
+            captureRect = window.frame
+            filter = SCContentFilter(desktopIndependentWindow: window)
+
+        case .display(let displayID):
+            if let displayID {
+                guard let match = content.displays.first(where: { $0.displayID == displayID }) else {
+                    throw ScreenRecordingError.displayNotFound(displayID)
+                }
+                display = match
+            } else {
+                guard let main = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
+                    ?? content.displays.first else {
+                    throw ScreenRecordingError.noDisplayAvailable
+                }
+                display = main
             }
-            display = main
+            let displayBounds = CGDisplayBounds(display.displayID)
+            captureRect = displayBounds
+            if let region = options.region {
+                let clipped = region.intersection(displayBounds)
+                if !clipped.isNull && !clipped.isEmpty {
+                    captureRect = clipped
+                }
+            }
+            // Sway's own windows are dropped by the capture system itself, so
+            // the picker and the recording control never appear in the frames.
+            let excluded = content.applications.filter {
+                options.excludedBundleIdentifiers.contains($0.bundleIdentifier)
+            }
+            filter = SCContentFilter(
+                display: display,
+                excludingApplications: excluded,
+                exceptingWindows: []
+            )
         }
 
         let displayBounds = CGDisplayBounds(display.displayID)
-        var captureRect = displayBounds
-        if let region = options.region {
-            captureRect = region.intersection(displayBounds)
-            if captureRect.isNull || captureRect.isEmpty {
-                captureRect = displayBounds
-            }
-        }
-
-        let scale = Double(display.width) > 0
+        let scale = Double(displayBounds.width) > 0
             ? Double(display.width) / Double(displayBounds.width)
             : 1
         // Keep pixel dimensions even; H.264 rejects odd dimensions.
@@ -127,7 +170,7 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.showsCursor = false
         configuration.capturesAudio = options.capturesSystemAudio
-        if #available(macOS 14.0, *), options.region != nil {
+        if #available(macOS 14.0, *), options.region != nil, case .display = options.target {
             // sourceRect is display-local, with the display's own origin.
             configuration.sourceRect = CGRect(
                 x: captureRect.origin.x - displayBounds.origin.x,
@@ -150,7 +193,6 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
 
         try setUpWriter(width: configuration.width, height: configuration.height)
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
         if options.capturesSystemAudio {
@@ -159,6 +201,20 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
         try await stream.startCapture()
         self.stream = stream
         isRecording = true
+    }
+
+    /// The display a window sits on, so window captures inherit that display's
+    /// backing scale.
+    private static func display(containing frame: CGRect, in content: SCShareableContent) throws -> SCDisplay {
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        if let match = content.displays.first(where: { CGDisplayBounds($0.displayID).contains(center) }) {
+            return match
+        }
+        guard let fallback = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
+            ?? content.displays.first else {
+            throw ScreenRecordingError.noDisplayAvailable
+        }
+        return fallback
     }
 
     /// Stops the capture and finishes the movie. Returns the recorded duration

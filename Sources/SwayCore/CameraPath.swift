@@ -93,6 +93,39 @@ public struct CameraConfig: Sendable {
     }
 }
 
+/// One stretch of zoomed-in camera, however it was decided: detected from
+/// clicks or authored by the user on the timeline.
+struct CameraShot {
+    var start: TimeInterval
+    var end: TimeInterval
+    var zoom: Double
+    /// Fixed point the shot is composed around, if it has one.
+    var anchorX: Double?
+    var anchorY: Double?
+    /// How much the anchor pulls the frame against the live cursor position.
+    var anchorWeight: Double
+
+    init(
+        start: TimeInterval,
+        end: TimeInterval,
+        zoom: Double,
+        anchorX: Double? = nil,
+        anchorY: Double? = nil,
+        anchorWeight: Double
+    ) {
+        self.start = start
+        self.end = end
+        self.zoom = zoom
+        self.anchorX = anchorX
+        self.anchorY = anchorY
+        self.anchorWeight = anchorWeight
+    }
+
+    func contains(_ time: TimeInterval) -> Bool {
+        time >= start && time <= end
+    }
+}
+
 /// Builds the camera path after recording, from the cursor track alone.
 ///
 /// The tracker and the camera stay separate on purpose: the camera never reacts
@@ -112,11 +145,50 @@ public struct CameraPathGenerator: Sendable {
         self.smoother = smoother
     }
 
+    /// Camera path from the automatically detected focus segments. Used by the
+    /// CLI and as a fallback; the editor drives `generate(track:duration:focus:)`
+    /// instead.
     public func generate(track: CursorTrack, duration: TimeInterval) -> CameraPath {
+        let end = duration > 0 ? duration : track.duration
+        let shots = focusDetector.segments(for: track, duration: end).map {
+            CameraShot(
+                start: $0.start,
+                end: $0.end,
+                zoom: config.focusZoom,
+                anchorX: $0.anchorX,
+                anchorY: $0.anchorY,
+                anchorWeight: 0.35
+            )
+        }
+        return generate(track: track, duration: end, shots: shots)
+    }
+
+    /// Camera path for one user-authored focus range: full frame outside it,
+    /// zoomed in and following the cursor inside it, with the springs producing
+    /// the ease in and out at the boundaries.
+    public func generate(
+        track: CursorTrack,
+        duration: TimeInterval,
+        focus: FocusRange?
+    ) -> CameraPath {
+        let shots = focus.map {
+            [CameraShot(start: $0.start, end: $0.end, zoom: max(1, $0.zoom), anchorWeight: 0)]
+        } ?? []
+        return generate(track: track, duration: duration, shots: shots)
+    }
+
+    private func generate(
+        track: CursorTrack,
+        duration: TimeInterval,
+        shots segments: [CameraShot]
+    ) -> CameraPath {
         let end = duration > 0 ? duration : track.duration
         guard end > 0 else { return CameraPath(frameRate: config.frameRate, keyframes: []) }
 
-        let path = smoother.smooth(track.resampled(hz: config.frameRate, duration: end))
+        // With no cursor data there is nothing to follow, but a focus range
+        // still has to zoom, so fall back to a centered path.
+        let smoothed = smoother.smooth(track.resampled(hz: config.frameRate, duration: end))
+        let path = smoothed.isEmpty ? centeredPath(duration: end) : smoothed
         guard !path.isEmpty else {
             return CameraPath(
                 frameRate: config.frameRate,
@@ -124,7 +196,6 @@ public struct CameraPathGenerator: Sendable {
             )
         }
 
-        let segments = focusDetector.segments(for: track, duration: end)
         var centerX = Spring(value: 0.5, stiffness: config.centerStiffness)
         var centerY = Spring(value: 0.5, stiffness: config.centerStiffness)
         var zoom = Spring(value: config.restZoom, stiffness: config.zoomStiffness)
@@ -147,7 +218,7 @@ public struct CameraPathGenerator: Sendable {
                 ? segments[segmentIndex]
                 : nil
 
-            let targetZoom = segment == nil ? config.restZoom : config.focusZoom
+            let targetZoom = segment?.zoom ?? config.restZoom
             zoom.advance(to: targetZoom, dt: dt)
             let currentZoom = max(1, zoom.value)
 
@@ -156,9 +227,11 @@ public struct CameraPathGenerator: Sendable {
                 let leadX = clamp(velocity.x * config.lookAhead, -config.maxLookAhead, config.maxLookAhead)
                 let leadY = clamp(velocity.y * config.lookAhead, -config.maxLookAhead, config.maxLookAhead)
                 // Anchor the shot on the interaction, but let the cursor pull
-                // the frame as it moves within it.
-                let desiredX = segment.anchorX * 0.35 + (sample.x + leadX) * 0.65
-                let desiredY = segment.anchorY * 0.35 + (sample.y + leadY) * 0.65
+                // the frame as it moves within it. A user-authored range has no
+                // anchor and follows the cursor alone.
+                let weight = segment.anchorWeight
+                let desiredX = (segment.anchorX ?? sample.x) * weight + (sample.x + leadX) * (1 - weight)
+                let desiredY = (segment.anchorY ?? sample.y) * weight + (sample.y + leadY) * (1 - weight)
                 // Dead zone: ignore movement that keeps the cursor comfortably
                 // inside the current viewport.
                 let halfViewport = 0.5 / currentZoom
@@ -195,6 +268,17 @@ public struct CameraPathGenerator: Sendable {
         }
 
         return CameraPath(frameRate: config.frameRate, keyframes: keyframes)
+    }
+
+    private func centeredPath(duration: TimeInterval) -> [CursorSample] {
+        let step = 1 / config.frameRate
+        var samples: [CursorSample] = []
+        var t: TimeInterval = 0
+        while t <= duration + step / 2 {
+            samples.append(CursorSample(time: t, x: 0.5, y: 0.5))
+            t += step
+        }
+        return samples
     }
 
     private func velocity(in path: [CursorSample], at index: Int) -> (x: Double, y: Double) {

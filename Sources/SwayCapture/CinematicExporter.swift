@@ -27,6 +27,9 @@ public struct ExportOptions: Sendable {
     public var cursorScale: Double
     public var drawsClickRings: Bool
     public var clickRingDuration: TimeInterval
+    /// Portion of the recording to export. `nil` exports all of it. A trimmed
+    /// export drops the audio track, since only the video is re-timed.
+    public var trim: ClosedRange<TimeInterval>?
     public var codec: AVVideoCodecType
 
     public init(
@@ -35,8 +38,10 @@ public struct ExportOptions: Sendable {
         cursorScale: Double = 1.4,
         drawsClickRings: Bool = true,
         clickRingDuration: TimeInterval = 0.45,
+        trim: ClosedRange<TimeInterval>? = nil,
         codec: AVVideoCodecType = .h264
     ) {
+        self.trim = trim
         self.size = size
         self.drawsCursor = drawsCursor
         self.cursorScale = cursorScale
@@ -52,18 +57,28 @@ public struct ExportOptions: Sendable {
 public final class CinematicExporter {
     private let bundle: SwayProjectBundle
     private let options: ExportOptions
+    private let overrideCamera: CameraPath?
     private let context = CIContext()
 
-    public init(bundle: SwayProjectBundle, options: ExportOptions = ExportOptions()) {
+    /// `camera` overrides the path stored in the bundle, which is how the
+    /// editor exports the range the user is currently looking at.
+    public init(
+        bundle: SwayProjectBundle,
+        options: ExportOptions = ExportOptions(),
+        camera: CameraPath? = nil
+    ) {
         self.bundle = bundle
         self.options = options
+        self.overrideCamera = camera
     }
 
     public func export(to outputURL: URL) async throws {
         let project = try bundle.readProject()
         let track = try bundle.readCursorTrack()
-        let camera = (try? bundle.readCameraPath())
+        let camera = overrideCamera
+            ?? (try? bundle.readCameraPath())
             ?? CameraPathGenerator().generate(track: track, duration: project.duration)
+        let trim = options.trim
 
         let asset = AVURLAsset(url: bundle.videoURL)
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
@@ -85,7 +100,7 @@ public final class CinematicExporter {
         reader.add(videoOutput)
 
         var audioOutput: AVAssetReaderTrackOutput?
-        if let audioTrack {
+        if let audioTrack, trim == nil {
             let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
             if reader.canAdd(output) {
                 reader.add(output)
@@ -166,6 +181,15 @@ public final class CinematicExporter {
                     let pts = CMSampleBufferGetPresentationTimeStamp(sample)
                     if firstPTS == nil { firstPTS = pts }
                     let relative = CMTimeGetSeconds(CMTimeSubtract(pts, firstPTS ?? .zero))
+                    if let trim {
+                        if relative < trim.lowerBound { continue }
+                        if relative > trim.upperBound {
+                            videoFinished = true
+                            videoInput.markAsFinished()
+                            continuation.resume()
+                            return
+                        }
+                    }
                     let state = camera.state(at: relative)
                         ?? CameraKeyframe(time: relative, centerX: 0.5, centerY: 0.5, zoom: 1)
 
@@ -177,7 +201,11 @@ public final class CinematicExporter {
                         renderer: renderer,
                         pool: adaptor.pixelBufferPool
                     ) else { continue }
-                    adaptor.append(rendered, withPresentationTime: CMTimeSubtract(pts, firstPTS ?? .zero))
+                    let outputTime = CMTime(
+                        seconds: relative - (trim?.lowerBound ?? 0),
+                        preferredTimescale: 600
+                    )
+                    adaptor.append(rendered, withPresentationTime: outputTime)
                 }
             }
         }
@@ -215,26 +243,13 @@ public final class CinematicExporter {
         renderer: CursorRenderer,
         pool: CVPixelBufferPool?
     ) -> CVPixelBuffer? {
-        let source = CIImage(cvPixelBuffer: pixelBuffer)
-        let sourceWidth = source.extent.width
-        let sourceHeight = source.extent.height
-
-        // Camera coordinates are top-left origin; CoreImage is bottom-left.
-        let cropWidth = sourceWidth / camera.zoom
-        let cropHeight = sourceHeight / camera.zoom
-        let cropX = camera.centerX * sourceWidth - cropWidth / 2
-        let cropY = (1 - camera.centerY) * sourceHeight - cropHeight / 2
-        let cropRect = CGRect(x: cropX, y: cropY, width: cropWidth, height: cropHeight)
-            .intersection(source.extent)
-
-        var image = source.cropped(to: cropRect)
-        image = renderer.draw(on: image, fullExtent: source.extent, time: time).cropped(to: cropRect)
-        image = image
-            .transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
-            .transformed(by: CGAffineTransform(
-                scaleX: outputSize.width / cropRect.width,
-                y: outputSize.height / cropRect.height
-            ))
+        let image = CameraFrameRenderer.render(
+            source: CIImage(cvPixelBuffer: pixelBuffer),
+            camera: camera,
+            time: time,
+            outputSize: outputSize,
+            cursor: renderer
+        )
 
         var output: CVPixelBuffer?
         if let pool {
@@ -257,13 +272,15 @@ public final class CinematicExporter {
 }
 
 /// Draws the cursor and click feedback into a frame, in source pixel space.
-struct CursorRenderer {
+/// Shared by the exporter and the editor's live preview, so what the user sees
+/// while scrubbing is what gets rendered.
+public struct CursorRenderer {
     let options: ExportOptions
     let track: CursorTrack
     let scale: Double
     private let clickTimes: [TimeInterval]
 
-    init(options: ExportOptions, track: CursorTrack, scale: Double) {
+    public init(options: ExportOptions, track: CursorTrack, scale: Double) {
         self.options = options
         self.track = track
         self.scale = scale
@@ -272,7 +289,7 @@ struct CursorRenderer {
 
     /// Cursor coordinates are normalized to the whole capture, so the overlay
     /// is placed in full-frame pixel space and the caller crops afterwards.
-    func draw(on image: CIImage, fullExtent: CGRect, time: TimeInterval) -> CIImage {
+    public func draw(on image: CIImage, fullExtent: CGRect, time: TimeInterval) -> CIImage {
         guard options.drawsCursor, let position = track.position(at: time) else { return image }
         // CoreImage's origin is bottom-left; the track's is top-left.
         let pixelX = fullExtent.origin.x + position.x * fullExtent.width

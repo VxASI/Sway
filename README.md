@@ -44,7 +44,34 @@ rather than pushing past the edge.
 exporter can draw a larger, smoothed cursor with a shadow and click rings from
 the recorded events.
 
-## Usage
+**The focus range is an edit, not a detection.** The editor's camera is driven
+by one explicit range on the timeline. Outside it the camera sits at 1x, dead
+center, showing the complete recording; inside it the camera zooms in and
+follows the recorded cursor with the dead zone, springs and edge clamping
+above, then eases back out at the end. Click detection only supplies the
+initial suggestion for where that range goes.
+
+## The app
+
+```sh
+./Scripts/package-app.sh          # -> .build/Sway.app, double-clickable
+open .build/Sway.app
+```
+
+```
+Record -> pick a display or window -> record -> stop (Shift-Cmd-S)
+  -> processed automatically -> editor -> drag the focus range -> Export
+```
+
+The picker lists every display and window with a live thumbnail and its macOS
+name ("Built-in Display", "LG Monitor"). While recording, the main window hides
+and a floating capsule shows the elapsed time and Stop; Sway itself is excluded
+from display captures. The editor shows the preview with the camera applied
+live, a playhead, trim handles, and one focus range drawn as a colored bar whose
+edges drag independently, plus a zoom amount and Export. No audio, microphone or
+webcam yet.
+
+## CLI
 
 ```sh
 swift build -c release
@@ -55,7 +82,7 @@ swift build -c release
 .build/release/sway recamera ~/Movies/demo.sway          # retune, no re-record
 ```
 
-`record` options: `--display <id>`, `--fps <n>`, `--no-audio`,
+`record` options: `--display <id>`, `--window <id>`, `--fps <n>`, `--no-audio`,
 `--duration <seconds>`. `export` options: `--no-cursor`, `--width <px>`.
 
 ### Permissions
@@ -75,6 +102,7 @@ demo.sway/
   screen.mov     H.264 + system audio, no cursor
   cursor.json    every cursor event, normalized, video-relative seconds
   camera.json    generated camera keyframes (center + zoom over time)
+  edit.json      trim points and the focus range the camera was generated from
 ```
 
 `cursor.json` events look like:
@@ -92,6 +120,7 @@ space; the visible viewport is `1 / zoom` of the capture on each axis.
 | --- | --- | --- |
 | `SwayCore` | any | timebase, geometry, cursor track, focus detection, camera path, bundle I/O |
 | `SwayCapture` | macOS 13+ | event tap, sampler, ScreenCaptureKit recorder, session, exporter |
+| `SwayApp` | macOS 13+ | SwiftUI app: capture picker, recording control, timeline editor |
 | `sway` | CLI | `record`, `export`, `inspect`, `recamera` |
 
 `SwayCore` is platform-independent and holds all the timing and camera math, so
@@ -103,4 +132,5 @@ it is unit tested with `swift test` on any platform.
 - Auto-hiding the cursor while typing (needs keyboard events in the tap).
 - Region capture is passed to `SCStreamConfiguration.sourceRect`, which requires
   macOS 14; on macOS 13 the full display is captured.
-- Editing UI - the bundle is designed for one, but `sway` is a CLI.
+- More than one focus range per recording, and any other clip-level editing.
+- Trimmed exports drop the audio track (only the video is re-timed).
