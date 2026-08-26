@@ -1,0 +1,214 @@
+import Foundation
+
+/// One camera state, in the same normalized capture space as the cursor track.
+/// `zoom` is a scale factor: the visible viewport is `1 / zoom` of the capture
+/// on each axis, centered on (`centerX`, `centerY`).
+public struct CameraKeyframe: Codable, Equatable, Sendable {
+    public var time: TimeInterval
+    public var centerX: Double
+    public var centerY: Double
+    public var zoom: Double
+
+    public init(time: TimeInterval, centerX: Double, centerY: Double, zoom: Double) {
+        self.time = time
+        self.centerX = centerX
+        self.centerY = centerY
+        self.zoom = zoom
+    }
+}
+
+public struct CameraPath: Codable, Equatable, Sendable {
+    public var frameRate: Double
+    public var keyframes: [CameraKeyframe]
+
+    public init(frameRate: Double, keyframes: [CameraKeyframe]) {
+        self.frameRate = frameRate
+        self.keyframes = keyframes
+    }
+
+    /// Camera state at an arbitrary time, interpolated between keyframes, so
+    /// the renderer is not tied to the path's own frame rate.
+    public func state(at time: TimeInterval) -> CameraKeyframe? {
+        guard let first = keyframes.first, let last = keyframes.last else { return nil }
+        if time <= first.time { return first }
+        if time >= last.time { return last }
+
+        var low = 0
+        var high = keyframes.count - 1
+        while high - low > 1 {
+            let mid = (low + high) / 2
+            if keyframes[mid].time <= time { low = mid } else { high = mid }
+        }
+        let a = keyframes[low]
+        let b = keyframes[high]
+        let span = b.time - a.time
+        guard span > 0 else { return b }
+        let t = (time - a.time) / span
+        return CameraKeyframe(
+            time: time,
+            centerX: a.centerX + (b.centerX - a.centerX) * t,
+            centerY: a.centerY + (b.centerY - a.centerY) * t,
+            zoom: a.zoom + (b.zoom - a.zoom) * t
+        )
+    }
+}
+
+public struct CameraConfig: Sendable {
+    /// Camera path resolution. Independent of the video frame rate; the
+    /// renderer interpolates between keyframes.
+    public var frameRate: Double
+    /// Zoom used inside a focus segment.
+    public var focusZoom: Double
+    /// Zoom outside focus segments (1 = full frame).
+    public var restZoom: Double
+    /// The cursor may roam this far (normalized, in viewport units) from the
+    /// camera center before the camera starts following it.
+    public var deadZone: Double
+    /// Seconds of cursor velocity to lead by, so the camera arrives with the
+    /// cursor instead of trailing it.
+    public var lookAhead: TimeInterval
+    /// Cap on the look-ahead offset, in normalized units.
+    public var maxLookAhead: Double
+    public var centerStiffness: Double
+    public var zoomStiffness: Double
+
+    public init(
+        frameRate: Double = 60,
+        focusZoom: Double = 1.8,
+        restZoom: Double = 1.0,
+        deadZone: Double = 0.18,
+        lookAhead: TimeInterval = 0.18,
+        maxLookAhead: Double = 0.12,
+        centerStiffness: Double = 45,
+        zoomStiffness: Double = 22
+    ) {
+        self.frameRate = frameRate
+        self.focusZoom = focusZoom
+        self.restZoom = restZoom
+        self.deadZone = deadZone
+        self.lookAhead = lookAhead
+        self.maxLookAhead = maxLookAhead
+        self.centerStiffness = centerStiffness
+        self.zoomStiffness = zoomStiffness
+    }
+}
+
+/// Builds the camera path after recording, from the cursor track alone.
+///
+/// The tracker and the camera stay separate on purpose: the camera never reacts
+/// to a raw event, only to the smoothed path plus the detected focus segments.
+public struct CameraPathGenerator: Sendable {
+    public var config: CameraConfig
+    public var focusDetector: FocusDetector
+    public var smoother: CursorPathSmoother
+
+    public init(
+        config: CameraConfig = CameraConfig(),
+        focusDetector: FocusDetector = FocusDetector(),
+        smoother: CursorPathSmoother = CursorPathSmoother()
+    ) {
+        self.config = config
+        self.focusDetector = focusDetector
+        self.smoother = smoother
+    }
+
+    public func generate(track: CursorTrack, duration: TimeInterval) -> CameraPath {
+        let end = duration > 0 ? duration : track.duration
+        guard end > 0 else { return CameraPath(frameRate: config.frameRate, keyframes: []) }
+
+        let path = smoother.smooth(track.resampled(hz: config.frameRate, duration: end))
+        guard !path.isEmpty else {
+            return CameraPath(
+                frameRate: config.frameRate,
+                keyframes: [CameraKeyframe(time: 0, centerX: 0.5, centerY: 0.5, zoom: config.restZoom)]
+            )
+        }
+
+        let segments = focusDetector.segments(for: track, duration: end)
+        var centerX = Spring(value: 0.5, stiffness: config.centerStiffness)
+        var centerY = Spring(value: 0.5, stiffness: config.centerStiffness)
+        var zoom = Spring(value: config.restZoom, stiffness: config.zoomStiffness)
+
+        var targetX = 0.5
+        var targetY = 0.5
+        var keyframes: [CameraKeyframe] = []
+        keyframes.reserveCapacity(path.count)
+        var previousTime = path[0].time
+        var segmentIndex = 0
+
+        for (index, sample) in path.enumerated() {
+            let dt = index == 0 ? 1 / config.frameRate : sample.time - previousTime
+            previousTime = sample.time
+
+            while segmentIndex < segments.count && segments[segmentIndex].end < sample.time {
+                segmentIndex += 1
+            }
+            let segment = segmentIndex < segments.count && segments[segmentIndex].contains(sample.time)
+                ? segments[segmentIndex]
+                : nil
+
+            let targetZoom = segment == nil ? config.restZoom : config.focusZoom
+            zoom.advance(to: targetZoom, dt: dt)
+            let currentZoom = max(1, zoom.value)
+
+            if let segment {
+                let velocity = self.velocity(in: path, at: index)
+                let leadX = clamp(velocity.x * config.lookAhead, -config.maxLookAhead, config.maxLookAhead)
+                let leadY = clamp(velocity.y * config.lookAhead, -config.maxLookAhead, config.maxLookAhead)
+                // Anchor the shot on the interaction, but let the cursor pull
+                // the frame as it moves within it.
+                let desiredX = segment.anchorX * 0.35 + (sample.x + leadX) * 0.65
+                let desiredY = segment.anchorY * 0.35 + (sample.y + leadY) * 0.65
+                // Dead zone: ignore movement that keeps the cursor comfortably
+                // inside the current viewport.
+                let halfViewport = 0.5 / currentZoom
+                let deadZone = config.deadZone * halfViewport * 2
+                if abs(desiredX - targetX) > deadZone {
+                    targetX += desiredX - targetX - copysign(deadZone, desiredX - targetX)
+                }
+                if abs(desiredY - targetY) > deadZone {
+                    targetY += desiredY - targetY - copysign(deadZone, desiredY - targetY)
+                }
+            } else {
+                targetX = 0.5
+                targetY = 0.5
+            }
+
+            // Clamp so the viewport never shows outside the captured frame. The
+            // cursor is allowed to sit off-center near an edge - that is what
+            // the eye expects.
+            let half = 0.5 / currentZoom
+            let clampedTargetX = clamp(targetX, half, 1 - half)
+            let clampedTargetY = clamp(targetY, half, 1 - half)
+
+            centerX.advance(to: clampedTargetX, dt: dt)
+            centerY.advance(to: clampedTargetY, dt: dt)
+
+            keyframes.append(
+                CameraKeyframe(
+                    time: sample.time,
+                    centerX: clamp(centerX.value, half, 1 - half),
+                    centerY: clamp(centerY.value, half, 1 - half),
+                    zoom: currentZoom
+                )
+            )
+        }
+
+        return CameraPath(frameRate: config.frameRate, keyframes: keyframes)
+    }
+
+    private func velocity(in path: [CursorSample], at index: Int) -> (x: Double, y: Double) {
+        guard index > 0 else { return (0, 0) }
+        let current = path[index]
+        let previous = path[index - 1]
+        let dt = current.time - previous.time
+        guard dt > 0 else { return (0, 0) }
+        return ((current.x - previous.x) / dt, (current.y - previous.y) / dt)
+    }
+}
+
+@inlinable
+func clamp(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
+    guard upper > lower else { return (lower + upper) / 2 }
+    return min(max(value, lower), upper)
+}
