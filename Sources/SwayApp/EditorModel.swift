@@ -68,7 +68,7 @@ final class EditorModel: ObservableObject {
             queue: .main
         ) { [weak self] time in
             let seconds = time.seconds
-            Task { @MainActor in self?.tick(seconds) }
+            Task { @MainActor [weak self] in self?.tick(seconds) }
         }
         seek(to: edit.trimStart)
     }
