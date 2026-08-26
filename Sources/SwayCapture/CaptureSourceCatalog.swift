@@ -39,7 +39,6 @@ public enum CaptureSourceCatalog {
 
         var sources: [CaptureSource] = []
         for display in content.displays {
-            let bounds = CGDisplayBounds(display.displayID)
             sources.append(
                 CaptureSource(
                     id: "display-\(display.displayID)",

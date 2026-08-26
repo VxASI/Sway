@@ -101,20 +101,17 @@ case "export":
         exportOptions.size = CGSize(width: width, height: (width / aspect).rounded())
     }
     let exporter = CinematicExporter(bundle: exportBundle, options: exportOptions)
-    let exportSemaphore = DispatchSemaphore(value: 0)
-    var exportExitCode: Int32 = 0
     Task {
         do {
             try await exporter.export(to: destination)
             print("exported to \(destination.path)")
+            exit(0)
         } catch {
             FileHandle.standardError.write(Data("sway: \(error)\n".utf8))
-            exportExitCode = 1
+            exit(1)
         }
-        exportSemaphore.signal()
     }
-    exportSemaphore.wait()
-    exit(exportExitCode)
+    dispatchMain()
     #else
     FileHandle.standardError.write(Data("sway: export requires macOS 13 or later\n".utf8))
     exit(1)
@@ -143,8 +140,6 @@ case "record":
     let autoStop = value(for: "--duration").flatMap(Double.init)
 
     let session = RecordingSession(bundleURL: bundleURL, options: options)
-    let semaphore = DispatchSemaphore(value: 0)
-    var exitCode: Int32 = 0
 
     Task {
         do {
@@ -165,15 +160,14 @@ case "record":
             let result = try await session.stop()
             print("saved \(String(format: "%.2f", result.project.duration))s to \(bundleURL.path)")
             try summarize(bundleAt: bundleURL.path)
+            exit(0)
         } catch {
             FileHandle.standardError.write(Data("sway: \(error)\n".utf8))
-            exitCode = 1
+            exit(1)
         }
-        semaphore.signal()
     }
 
-    semaphore.wait()
-    exit(exitCode)
+    dispatchMain()
     #else
     FileHandle.standardError.write(Data("sway: recording requires macOS 13 or later\n".utf8))
     exit(1)
