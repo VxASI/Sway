@@ -85,14 +85,27 @@ swift build -c release
 `record` options: `--display <id>`, `--window <id>`, `--fps <n>`, `--no-audio`,
 `--duration <seconds>`. `export` options: `--no-cursor`, `--width <px>`.
 
-### Permissions
+## Permissions
 
-- **Screen Recording** - required by ScreenCaptureKit.
-- **Input Monitoring** (and Accessibility if prompted) - required for the event
-  tap; without it `sway record` fails with a `CGEventTap` error.
+- **Screen Recording** - ScreenCaptureKit, for both the picker's window list and
+  the capture itself.
+- **Input Monitoring** - the listen-only `CGEventTap` that records the cursor;
+  without it recording fails with a `CGEventTap` error.
 
-Both are granted to whatever process runs the binary, so when running from a
-terminal, grant them to that terminal.
+The app checks both with `CGPreflightScreenCaptureAccess` /
+`CGPreflightListenEventAccess` before it touches ScreenCaptureKit, and shows a
+permissions screen with per-permission deep links into System Settings if either
+is missing. This matters: calling `SCShareableContent` without Screen Recording
+permission can block for a long time instead of failing, which is
+indistinguishable from a hung picker. Every ScreenCaptureKit call the UI makes
+is also bounded by a timeout for the same reason.
+
+**macOS applies a permission change on the next launch**, so quit and reopen
+Sway after granting. Permission is granted to the process that runs the code:
+run `Sway.app`, not `swift run`, or the grant lands on your terminal instead.
+`package-app.sh` ad-hoc signs with the fixed identifier `ai.sway.Sway` so the
+grants survive rebuilds; if macOS ever gets confused, remove Sway from the two
+privacy lists, rebuild, and grant again.
 
 ## Bundle format
 

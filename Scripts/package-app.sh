@@ -18,8 +18,9 @@ cp "$BINARY" "$APP/Contents/MacOS/Sway"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# Ad-hoc signature so TCC (screen recording, input monitoring) can remember the
-# permission grants between launches.
-codesign --force --deep --sign - "$APP"
+# Ad-hoc signature with a fixed identifier: TCC keys the Screen Recording and
+# Input Monitoring grants off it, so without this every rebuild looks like a
+# different app and the permissions have to be granted again.
+codesign --force --sign - --identifier ai.sway.Sway --timestamp=none "$APP"
 
 echo "built $APP"

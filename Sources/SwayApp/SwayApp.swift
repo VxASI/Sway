@@ -39,6 +39,8 @@ struct RootView: View {
             switch model.phase {
             case .idle:
                 WelcomeView()
+            case .permissions:
+                PermissionsView()
             case .picking:
                 CapturePickerView()
             case .recording:

@@ -1,3 +1,4 @@
+import CoreGraphics
 import SwayCapture
 import SwiftUI
 
@@ -12,7 +13,9 @@ struct CapturePickerView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if model.isLoadingSources && model.sources.isEmpty {
+            if let error = model.sourcesError {
+                failure(error)
+            } else if model.isLoadingSources && model.sources.isEmpty {
                 ProgressView("Looking for screens and windows…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -57,6 +60,23 @@ struct CapturePickerView: View {
         .padding(20)
     }
 
+    private func failure(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 34))
+                .foregroundStyle(.orange)
+            Text(message)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 440)
+            HStack(spacing: 12) {
+                Button("Try Again") { model.reloadSources() }
+                Button("Open Privacy Settings") { model.openSettings(for: .screenRecording) }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     @ViewBuilder
     private func section(_ title: String, sources: [CaptureSource]) -> some View {
         if !sources.isEmpty {
@@ -68,6 +88,7 @@ struct CapturePickerView: View {
                     ForEach(sources) { source in
                         CaptureSourceTile(
                             source: source,
+                            thumbnail: model.thumbnails[source.id],
                             isSelected: model.selectedSourceID == source.id
                         )
                         .onTapGesture { model.selectedSourceID = source.id }
@@ -80,6 +101,7 @@ struct CapturePickerView: View {
 
 private struct CaptureSourceTile: View {
     let source: CaptureSource
+    let thumbnail: CGImage?
     let isSelected: Bool
 
     var body: some View {
@@ -87,7 +109,7 @@ private struct CaptureSourceTile: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.black.opacity(0.25))
-                if let thumbnail = source.thumbnail {
+                if let thumbnail {
                     Image(thumbnail, scale: 1, label: Text(source.name))
                         .resizable()
                         .aspectRatio(contentMode: .fit)

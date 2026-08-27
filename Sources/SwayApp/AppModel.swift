@@ -1,15 +1,18 @@
 import AppKit
 import Combine
+import CoreGraphics
 import Foundation
 import SwayCapture
 import SwayCore
 import SwiftUI
 
-/// Drives the whole product flow: pick a source, record, process, edit, export.
+/// Drives the whole product flow: permissions, pick a source, record, process,
+/// edit, export.
 @MainActor
 final class AppModel: ObservableObject {
     enum Phase: Equatable {
         case idle
+        case permissions
         case picking
         case recording
         case processing
@@ -18,18 +21,25 @@ final class AppModel: ObservableObject {
 
     @Published var phase: Phase = .idle
     @Published var sources: [CaptureSource] = []
+    @Published var thumbnails: [String: CGImage] = [:]
     @Published var selectedSourceID: String?
     @Published var isLoadingSources = false
+    /// Shown inside the picker: a hang-free failure is still a failure the user
+    /// has to be able to see and retry.
+    @Published var sourcesError: String?
+    @Published var missingPermissions: [CapturePermissions.Permission] = []
     /// Bound by `MenuBarExtra`, so the menu bar item only exists while recording.
     @Published var isRecording = false
     @Published var elapsed: TimeInterval = 0
     @Published var errorMessage: String?
     @Published var editor: EditorModel?
 
+    private let catalog = CaptureSourceCatalog()
     private var session: RecordingSession?
     private var recordingControl: RecordingControlPanel?
     private var timer: AnyCancellable?
     private var hotKey: StopHotKey?
+    private var thumbnailTask: Task<Void, Never>?
 
     var isBusy: Bool { phase == .recording || phase == .processing }
 
@@ -46,12 +56,41 @@ final class AppModel: ObservableObject {
         sources.first { $0.id == selectedSourceID }
     }
 
-    // MARK: - Picking
+    // MARK: - Permissions
 
+    /// Both permissions are checked up front. Screen Recording especially:
+    /// calling ScreenCaptureKit without it can block instead of failing, which
+    /// is indistinguishable from a hung app.
     func showPicker() {
+        for permission in CapturePermissions.missing {
+            CapturePermissions.request(permission)
+        }
+        missingPermissions = CapturePermissions.missing
+        guard missingPermissions.isEmpty else {
+            phase = .permissions
+            return
+        }
         phase = .picking
         reloadSources()
     }
+
+    func recheckPermissions() {
+        missingPermissions = CapturePermissions.missing
+        if missingPermissions.isEmpty {
+            phase = .picking
+            reloadSources()
+        }
+    }
+
+    func openSettings(for permission: CapturePermissions.Permission) {
+        CapturePermissions.openSettings(for: permission)
+    }
+
+    func cancelPermissions() {
+        phase = editor == nil ? .idle : .editing
+    }
+
+    // MARK: - Picking
 
     func cancelPicking() {
         phase = editor == nil ? .idle : .editing
@@ -59,20 +98,41 @@ final class AppModel: ObservableObject {
 
     func reloadSources() {
         isLoadingSources = true
+        sourcesError = nil
+        thumbnailTask?.cancel()
         Task {
             do {
-                let loaded = try await CaptureSourceCatalog.load(
+                await catalog.invalidate()
+                let loaded = try await catalog.sources(
                     excludingBundleIdentifiers: [AppModel.bundleIdentifier]
                 )
                 self.sources = loaded
                 if self.selectedSource == nil {
                     self.selectedSourceID = loaded.first?.id
                 }
+                self.loadThumbnails(for: loaded)
+            } catch CaptureSourceError.screenRecordingPermissionMissing {
+                self.missingPermissions = CapturePermissions.missing
+                self.phase = .permissions
             } catch {
-                self.errorMessage = "Could not list what can be recorded. "
-                    + "Grant Sway Screen Recording in System Settings > Privacy & Security.\n\n\(error)"
+                self.sourcesError = "Could not list what can be recorded.\n\(error)"
             }
             self.isLoadingSources = false
+        }
+    }
+
+    /// Thumbnails arrive one at a time after the list is already on screen; a
+    /// screenshot per window is slow enough that waiting for all of them makes
+    /// the picker look stuck.
+    private func loadThumbnails(for sources: [CaptureSource]) {
+        thumbnails = [:]
+        thumbnailTask = Task {
+            for source in sources {
+                if Task.isCancelled { return }
+                if let image = await catalog.thumbnail(for: source.target) {
+                    self.thumbnails[source.id] = image
+                }
+            }
         }
     }
 
@@ -80,6 +140,12 @@ final class AppModel: ObservableObject {
 
     func startRecording() {
         guard let source = selectedSource else { return }
+        missingPermissions = CapturePermissions.missing
+        guard missingPermissions.isEmpty else {
+            phase = .permissions
+            return
+        }
+
         let options = ScreenRecorderOptions(
             target: source.target,
             frameRate: 60,
@@ -98,8 +164,9 @@ final class AppModel: ObservableObject {
                 self.beginRecordingUI()
             } catch {
                 self.session = nil
+                self.missingPermissions = CapturePermissions.missing
                 self.errorMessage = "Could not start recording.\n\n\(error)"
-                self.phase = .picking
+                self.phase = self.missingPermissions.isEmpty ? .picking : .permissions
             }
         }
     }
@@ -160,7 +227,6 @@ final class AppModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = []
         panel.message = "Choose a .sway recording"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

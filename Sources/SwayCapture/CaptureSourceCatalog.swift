@@ -5,7 +5,8 @@ import Foundation
 import ScreenCaptureKit
 
 /// One thing the user can pick in the capture picker: a whole display or a
-/// single window, with the thumbnail and the name shown next to it.
+/// single window, with the name shown next to it. Thumbnails are fetched
+/// separately, since a screenshot per window is far slower than listing them.
 public struct CaptureSource: Identifiable, Sendable {
     public enum Kind: Sendable, Equatable {
         case display
@@ -19,7 +20,6 @@ public struct CaptureSource: Identifiable, Sendable {
     public let name: String
     /// Owning application for windows, resolution for displays.
     public let subtitle: String
-    public let thumbnail: CGImage?
     public let width: Int
     public let height: Int
 
@@ -28,33 +28,48 @@ public struct CaptureSource: Identifiable, Sendable {
     }
 }
 
-/// Lists what can be captured right now, with thumbnails, excluding Sway's own
-/// windows so the picker never offers to record itself.
-public enum CaptureSourceCatalog {
-    public static func load(excludingBundleIdentifiers excluded: [String] = []) async throws -> [CaptureSource] {
-        let content = try await SCShareableContent.excludingDesktopWindows(
-            true,
-            onScreenWindowsOnly: true
-        )
+public enum CaptureSourceError: Error, CustomStringConvertible {
+    case screenRecordingPermissionMissing
+    case timedOut
 
-        var sources: [CaptureSource] = []
-        for display in content.displays {
-            sources.append(
-                CaptureSource(
-                    id: "display-\(display.displayID)",
-                    kind: .display,
-                    target: .display(display.displayID),
-                    name: displayName(for: display.displayID),
-                    subtitle: "\(display.width) x \(display.height)",
-                    thumbnail: await thumbnail(
-                        filter: SCContentFilter(display: display, excludingWindows: []),
-                        width: display.width,
-                        height: display.height,
-                        legacy: { CGDisplayCreateImage(display.displayID) }
-                    ),
-                    width: display.width,
-                    height: display.height
-                )
+    public var description: String {
+        switch self {
+        case .screenRecordingPermissionMissing:
+            return "Screen Recording permission has not been granted to Sway."
+        case .timedOut:
+            return "ScreenCaptureKit did not answer in time."
+        }
+    }
+}
+
+/// Lists what can be captured right now, excluding Sway's own windows so the
+/// picker never offers to record itself.
+///
+/// An actor rather than free functions because the picker asks for thumbnails
+/// one tile at a time and they all need the same `SCShareableContent`.
+public actor CaptureSourceCatalog {
+    private var content: SCShareableContent?
+
+    public init() {}
+
+    /// Lists displays and windows. Fast: no screenshots are taken here.
+    public func sources(excludingBundleIdentifiers excluded: [String] = []) async throws -> [CaptureSource] {
+        // Without this check `SCShareableContent` can sit there for a long time
+        // instead of failing, which looks like a hung picker.
+        guard CapturePermissions.hasScreenRecording else {
+            throw CaptureSourceError.screenRecordingPermissionMissing
+        }
+
+        let content = try await shareableContent()
+        var sources = content.displays.map { display in
+            CaptureSource(
+                id: "display-\(display.displayID)",
+                kind: .display,
+                target: .display(display.displayID),
+                name: CaptureSourceCatalog.displayName(for: display.displayID),
+                subtitle: "\(display.width) x \(display.height)",
+                width: display.width,
+                height: display.height
             )
         }
 
@@ -69,33 +84,62 @@ public enum CaptureSourceCatalog {
             }
             .sorted { ($0.owningApplication?.applicationName ?? "") < ($1.owningApplication?.applicationName ?? "") }
 
-        for window in windows {
-            sources.append(
-                CaptureSource(
-                    id: "window-\(window.windowID)",
-                    kind: .window,
-                    target: .window(window.windowID),
-                    name: window.title ?? window.owningApplication?.applicationName ?? "Window",
-                    subtitle: window.owningApplication?.applicationName ?? "",
-                    thumbnail: await thumbnail(
-                        filter: SCContentFilter(desktopIndependentWindow: window),
-                        width: Int(window.frame.width),
-                        height: Int(window.frame.height),
-                        legacy: {
-                            CGWindowListCreateImage(
-                                .null,
-                                .optionIncludingWindow,
-                                window.windowID,
-                                [.boundsIgnoreFraming, .bestResolution]
-                            )
-                        }
-                    ),
-                    width: Int(window.frame.width),
-                    height: Int(window.frame.height)
-                )
+        sources += windows.map { window in
+            CaptureSource(
+                id: "window-\(window.windowID)",
+                kind: .window,
+                target: .window(window.windowID),
+                name: window.title ?? window.owningApplication?.applicationName ?? "Window",
+                subtitle: window.owningApplication?.applicationName ?? "",
+                width: Int(window.frame.width),
+                height: Int(window.frame.height)
             )
         }
         return sources
+    }
+
+    /// A preview image for one source. Returns `nil` rather than throwing: a
+    /// missing thumbnail must never stop the user from picking something.
+    public func thumbnail(for target: CaptureTarget, maximumWidth: Int = 480) async -> CGImage? {
+        guard CapturePermissions.hasScreenRecording else { return nil }
+        guard let content = try? await shareableContent() else { return nil }
+
+        switch target {
+        case let .display(displayID):
+            guard let display = content.displays.first(where: {
+                displayID == nil || $0.displayID == displayID
+            }) else { return nil }
+            return await image(
+                filter: SCContentFilter(display: display, excludingWindows: []),
+                width: display.width,
+                height: display.height,
+                maximumWidth: maximumWidth,
+                legacy: { CGDisplayCreateImage(display.displayID) }
+            )
+        case let .window(windowID):
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                return nil
+            }
+            return await image(
+                filter: SCContentFilter(desktopIndependentWindow: window),
+                width: Int(window.frame.width),
+                height: Int(window.frame.height),
+                maximumWidth: maximumWidth,
+                legacy: {
+                    CGWindowListCreateImage(
+                        .null,
+                        .optionIncludingWindow,
+                        windowID,
+                        [.boundsIgnoreFraming, .bestResolution]
+                    )
+                }
+            )
+        }
+    }
+
+    /// Drops the cached window list so the next call sees the current desktop.
+    public func invalidate() {
+        content = nil
     }
 
     /// The name macOS shows for a display ("Built-in Display", "LG Monitor").
@@ -110,26 +154,57 @@ public enum CaptureSourceCatalog {
         return CGDisplayIsBuiltin(displayID) != 0 ? "Built-in Display" : "Display \(displayID)"
     }
 
-    private static func thumbnail(
+    private func shareableContent() async throws -> SCShareableContent {
+        if let content { return content }
+        let fetched = try await CaptureSourceCatalog.withTimeout(seconds: 10) {
+            try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        }
+        content = fetched
+        return fetched
+    }
+
+    private func image(
         filter: SCContentFilter,
         width: Int,
         height: Int,
-        legacy: () -> CGImage?
+        maximumWidth: Int,
+        legacy: @Sendable @escaping () -> CGImage?
     ) async -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let configuration = SCStreamConfiguration()
-        let scale = min(1, 480 / Double(width))
+        let scale = min(1, Double(maximumWidth) / Double(width))
         configuration.width = max(2, Int(Double(width) * scale))
         configuration.height = max(2, Int(Double(height) * scale))
         configuration.showsCursor = false
         if #available(macOS 14.0, *) {
-            return try? await SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: configuration
-            )
+            return try? await CaptureSourceCatalog.withTimeout(seconds: 5) {
+                try await SCScreenshotManager.captureImage(
+                    contentFilter: filter,
+                    configuration: configuration
+                )
+            }
         }
         // macOS 13 has no screenshot API in ScreenCaptureKit.
         return legacy()
+    }
+
+    /// ScreenCaptureKit calls can stall (a pending or half-granted TCC prompt,
+    /// a wedged window server). Everything user-facing goes through here so the
+    /// UI gets an error instead of a spinner that never stops.
+    static func withTimeout<T: Sendable>(
+        seconds: Double,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw CaptureSourceError.timedOut
+            }
+            guard let result = try await group.next() else { throw CaptureSourceError.timedOut }
+            group.cancelAll()
+            return result
+        }
     }
 }
 #endif
