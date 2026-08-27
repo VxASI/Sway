@@ -32,13 +32,24 @@ public struct CaptureSource: Identifiable, Sendable {
 public enum CaptureSourceError: Error, CustomStringConvertible {
     case screenRecordingPermissionMissing
     case timedOut
+    case failed(String)
 
     public var description: String {
         switch self {
         case .screenRecordingPermissionMissing:
-            return "Screen Recording permission has not been granted to Sway."
+            return """
+            Sway does not have Screen Recording permission yet. If you just \
+            granted it, quit and reopen Sway - macOS only applies the grant to \
+            a fresh launch.
+            """
         case .timedOut:
-            return "ScreenCaptureKit did not answer in time."
+            return """
+            ScreenCaptureKit stopped responding. This is usually a stuck screen \
+            recording daemon: run `killall -9 replayd` in Terminal, then try \
+            again.
+            """
+        case let .failed(message):
+            return message
         }
     }
 }
@@ -171,22 +182,7 @@ public actor CaptureSourceCatalog {
     private func shareableContent() async throws -> SCShareableContent {
         if let content { return content }
         log.info("fetching shareable content")
-        let fetched: SCShareableContent
-        do {
-            fetched = try await CaptureSourceCatalog.withTimeout(seconds: 10) {
-                try await SCShareableContent.excludingDesktopWindows(
-                    true,
-                    onScreenWindowsOnly: true
-                )
-            }
-        } catch is CaptureSourceError {
-            throw CaptureSourceError.timedOut
-        } catch {
-            // ScreenCaptureKit refuses to enumerate anything without Screen
-            // Recording, so any other failure here is that permission.
-            log.error("shareable content failed: \(error, privacy: .public)")
-            throw CaptureSourceError.screenRecordingPermissionMissing
-        }
+        let fetched = try await CaptureSourceCatalog.shareableContentWithDeadline(seconds: 8)
         content = fetched
         return fetched
     }
@@ -214,6 +210,71 @@ public actor CaptureSourceCatalog {
         }
         // macOS 13 has no screenshot API in ScreenCaptureKit.
         return legacy()
+    }
+
+    /// The completion-handler form of the shareable content call, with a hard
+    /// deadline.
+    ///
+    /// The `async` form of this API is known to never return when the app's
+    /// Screen Recording grant is half-applied (typically: granted during this
+    /// launch) or when `replayd` is wedged. Since a hung continuation cannot be
+    /// cancelled, the deadline lives outside it: whichever of the callback and
+    /// the timer fires first wins, and the UI always gets an answer.
+    private static func shareableContentWithDeadline(
+        seconds: Double
+    ) async throws -> SCShareableContent {
+        let result: Result<SCShareableContent, Error>? = await withCheckedContinuation {
+            continuation in
+            let once = ResumeOnce()
+            SCShareableContent.getExcludingDesktopWindows(
+                true,
+                onScreenWindowsOnly: true
+            ) { content, error in
+                guard once.claim() else { return }
+                if let content {
+                    continuation.resume(returning: .success(content))
+                } else {
+                    continuation.resume(
+                        returning: .failure(error ?? CaptureSourceError.timedOut)
+                    )
+                }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+                guard once.claim() else { return }
+                continuation.resume(returning: nil)
+            }
+        }
+
+        switch result {
+        case .none:
+            throw CaptureSourceError.timedOut
+        case let .success(content):
+            return content
+        case let .failure(error):
+            let code = (error as NSError).code
+            log.error("shareable content failed (\(code, privacy: .public)): \(error, privacy: .public)")
+            // SCStreamError.userDeclined
+            if code == -3801 {
+                throw CaptureSourceError.screenRecordingPermissionMissing
+            }
+            throw CaptureSourceError.failed(
+                "ScreenCaptureKit could not list what can be recorded.\n\n\(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Guards a continuation that two callers race to resume.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if claimed { return false }
+            claimed = true
+            return true
+        }
     }
 
     /// ScreenCaptureKit calls can stall (a pending or half-granted TCC prompt,

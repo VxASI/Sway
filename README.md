@@ -92,20 +92,38 @@ swift build -c release
 - **Input Monitoring** - the listen-only `CGEventTap` that records the cursor;
   without it recording fails with a `CGEventTap` error.
 
-The app checks both with `CGPreflightScreenCaptureAccess` /
-`CGPreflightListenEventAccess` before it touches ScreenCaptureKit, and shows a
-permissions screen with per-permission deep links into System Settings if either
-is missing. This matters: calling `SCShareableContent` without Screen Recording
-permission can block for a long time instead of failing, which is
-indistinguishable from a hung picker. Every ScreenCaptureKit call the UI makes
-is also bounded by a timeout for the same reason.
+Three properties of these APIs shape the whole permission flow, and all three
+present as a hang if they are ignored:
 
-**macOS applies a permission change on the next launch**, so quit and reopen
-Sway after granting. Permission is granted to the process that runs the code:
-run `Sway.app`, not `swift run`, or the grant lands on your terminal instead.
-`package-app.sh` ad-hoc signs with the fixed identifier `ai.sway.Sway` so the
-grants survive rebuilds; if macOS ever gets confused, remove Sway from the two
-privacy lists, rebuild, and grant again.
+1. **A new Screen Recording grant does not apply to the running process.**
+   `SCShareableContent` keeps failing - or never returns at all - until the app
+   is relaunched. The permissions screen therefore distinguishes *granted* from
+   *granted, pending relaunch* (by remembering whether the permission was ever
+   observed missing during this launch) and offers a **Reopen Sway** button.
+   Polling for longer does not help; only a relaunch does.
+2. **The TCC calls themselves can block.** `CGPreflightScreenCaptureAccess` and
+   `CGPreflightListenEventAccess` talk to `tccd`, so they run off the main
+   thread behind a deadline. An unanswered check is reported as unknown, with a
+   remedy, rather than being guessed at.
+3. **The `async` `SCShareableContent` API has no timeout and can hang forever.**
+   The completion-handler form (`getExcludingDesktopWindows`) is used instead,
+   with the deadline outside the continuation, so the UI always gets content, an
+   error, or a timeout.
+
+If ScreenCaptureKit stops answering entirely, `replayd` is usually wedged (often
+after force-quitting an app mid-capture): `killall -9 replayd` fixes it.
+
+Permission is granted to the process that runs the code: run `Sway.app`, not
+`swift run`, or the grant lands on your terminal instead.
+
+**Signing matters more than it looks.** TCC keys grants to the code-signing
+identity, and an ad-hoc signature (`codesign --sign -`) changes with every
+rebuild - macOS then silently ignores the previous grant while the toggle still
+looks on. `package-app.sh` uses an *Apple Development* or *Developer ID*
+certificate if you have one (override with `SWAY_SIGN_IDENTITY`), which keeps
+the grant across rebuilds. Without one it falls back to ad-hoc and clears
+Sway's own TCC entries (`tccutil reset ScreenCapture ai.sway.Sway`) so the next
+launch asks again cleanly instead of failing silently.
 
 ## Bundle format
 

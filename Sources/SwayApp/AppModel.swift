@@ -5,6 +5,7 @@ import Foundation
 import SwayCapture
 import SwayCore
 import SwiftUI
+import os
 
 /// Drives the whole product flow: permissions, pick a source, record, process,
 /// edit, export.
@@ -27,8 +28,7 @@ final class AppModel: ObservableObject {
     /// Shown inside the picker: a hang-free failure is still a failure the user
     /// has to be able to see and retry.
     @Published var sourcesError: String?
-    @Published var missingPermissions: [CapturePermissions.Permission] = []
-    @Published var requestingPermissions: Set<CapturePermissions.Permission> = []
+    let permissions = PermissionMonitor()
     /// Bound by `MenuBarExtra`, so the menu bar item only exists while recording.
     @Published var isRecording = false
     @Published var elapsed: TimeInterval = 0
@@ -41,22 +41,16 @@ final class AppModel: ObservableObject {
     private var timer: AnyCancellable?
     private var hotKey: StopHotKey?
     private var thumbnailTask: Task<Void, Never>?
+    private var permissionsObserver: AnyCancellable?
+    private let log = Logger(subsystem: "ai.sway.Sway", category: "app")
 
     init() {
-        // Granting happens in System Settings, so the app finds out it now has
-        // permission when the user switches back to it.
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                // Only while the permissions screen is up: rechecking on every
-                // activation would run a TCC preflight the user never asked for.
-                if self.phase == .permissions { self.recheckPermissions() }
-            }
+        // The monitor is a separate object, so its changes have to be forwarded
+        // for views observing the model alone to update.
+        permissionsObserver = permissions.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
+        log.info("app model ready")
     }
 
     var isBusy: Bool { phase == .recording || phase == .processing }
@@ -76,58 +70,47 @@ final class AppModel: ObservableObject {
 
     // MARK: - Permissions
 
-    /// Both permissions are checked up front. Screen Recording especially:
-    /// calling ScreenCaptureKit without it can block instead of failing, which
-    /// is indistinguishable from a hung app.
+    /// Record always lands somewhere immediately: the picker if the permissions
+    /// checked out at launch, the permissions screen otherwise. Nothing here
+    /// waits on the system.
     func showPicker() {
-        // Straight to the picker: the permission check is asynchronous, and the
-        // picker itself reports a missing permission. Waiting for the check
-        // before showing anything is what made Record feel dead.
-        phase = .picking
-        reloadSources()
-    }
-
-    @discardableResult
-    private func refreshPermissions() async -> [CapturePermissions.Permission] {
-        let missing = await CapturePermissions.missing()
-        self.missingPermissions = missing
-        return missing
-    }
-
-    /// Triggers the system prompt for one permission. The request itself blocks
-    /// its thread until the user answers, so it is never awaited on the main
-    /// thread - that is what froze the app behind the prompt.
-    func requestPermission(_ permission: CapturePermissions.Permission) {
-        guard !requestingPermissions.contains(permission) else { return }
-        requestingPermissions.insert(permission)
+        log.info("record tapped")
         Task {
-            await CapturePermissions.request(permission)
-            self.requestingPermissions.remove(permission)
-            self.recheckPermissions()
-        }
-    }
-
-    func recheckPermissions() {
-        Task {
-            let missing = await self.refreshPermissions()
-            if missing.isEmpty, self.phase == .permissions {
+            await self.permissions.refresh()
+            if self.permissions.isReadyToRecord {
                 self.phase = .picking
                 self.reloadSources()
+            } else {
+                self.phase = .permissions
+                self.permissions.startPolling()
             }
         }
+        // Shown while the checks run, so the button responds on the first click.
+        phase = .picking
+        isLoadingSources = true
     }
 
-    func openSettings(for permission: CapturePermissions.Permission) {
-        CapturePermissions.openSettings(for: permission)
+    func showPermissions() {
+        phase = .permissions
+        permissions.startPolling()
     }
 
-    func cancelPermissions() {
+    func leavePermissions() {
+        permissions.stopPolling()
         phase = editor == nil ? .idle : .editing
+    }
+
+    /// Called by the permissions screen once everything is usable.
+    func permissionsSatisfied() {
+        permissions.stopPolling()
+        phase = .picking
+        reloadSources()
     }
 
     // MARK: - Picking
 
     func cancelPicking() {
+        thumbnailTask?.cancel()
         phase = editor == nil ? .idle : .editing
     }
 
@@ -147,10 +130,9 @@ final class AppModel: ObservableObject {
                 }
                 self.loadThumbnails(for: loaded)
             } catch CaptureSourceError.screenRecordingPermissionMissing {
-                await self.refreshPermissions()
-                self.phase = .permissions
+                self.showPermissions()
             } catch {
-                self.sourcesError = "Could not list what can be recorded.\n\(error)"
+                self.sourcesError = "\(error)"
             }
             self.isLoadingSources = false
         }
@@ -185,14 +167,6 @@ final class AppModel: ObservableObject {
         self.session = session
 
         Task {
-            // Only the cursor tap is checked here: Screen Recording already
-            // proved itself by listing the sources behind this button.
-            if await CapturePermissions.status(.inputMonitoring) == false {
-                self.session = nil
-                self.missingPermissions = [.inputMonitoring]
-                self.phase = .permissions
-                return
-            }
             do {
                 try await session.start()
                 self.phase = .recording
@@ -201,9 +175,13 @@ final class AppModel: ObservableObject {
                 self.beginRecordingUI()
             } catch {
                 self.session = nil
-                let missing = await self.refreshPermissions()
-                self.errorMessage = "Could not start recording.\n\n\(error)"
-                self.phase = missing.isEmpty ? .picking : .permissions
+                await self.permissions.refresh()
+                if self.permissions.isReadyToRecord {
+                    self.errorMessage = "Could not start recording.\n\n\(error)"
+                    self.phase = .picking
+                } else {
+                    self.showPermissions()
+                }
             }
         }
     }

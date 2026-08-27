@@ -16,8 +16,22 @@ struct CapturePickerView: View {
             if let error = model.sourcesError {
                 failure(error)
             } else if model.isLoadingSources && model.sources.isEmpty {
-                ProgressView("Looking for screens and windows…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Looking for screens and windows…")
+                        .foregroundStyle(.secondary)
+                    // Every path out of this state is bounded, but say so:
+                    // a spinner with no way out is what this screen is for.
+                    Button("Cancel") { model.cancelPicking() }
+                        .buttonStyle(.link)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.sources.isEmpty {
+                failure("""
+                macOS reported nothing that can be recorded. If you just granted \
+                Screen Recording, quit and reopen Sway - the grant only applies \
+                to a fresh launch.
+                """)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
@@ -71,7 +85,10 @@ struct CapturePickerView: View {
                 .frame(maxWidth: 440)
             HStack(spacing: 12) {
                 Button("Try Again") { model.reloadSources() }
-                Button("Open Privacy Settings") { model.openSettings(for: .screenRecording) }
+                Button("Permissions") { model.showPermissions() }
+                Button("Open Privacy Settings") {
+                    model.permissions.openSettings(for: .screenRecording)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

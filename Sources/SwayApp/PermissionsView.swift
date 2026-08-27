@@ -1,64 +1,133 @@
 import SwayCapture
 import SwiftUI
 
-/// Shown instead of the picker when a TCC permission is missing, so a denied
-/// permission reads as an instruction rather than an empty or hung picker.
+/// The permission gate. Every state here is an explicit, actionable one: there
+/// is no path through this screen that just spins.
 struct PermissionsView: View {
     @EnvironmentObject private var model: AppModel
 
+    private var monitor: PermissionMonitor { model.permissions }
+
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "lock.shield")
-                .font(.system(size: 46))
+        VStack(spacing: 18) {
+            Image(systemName: monitor.needsRelaunch ? "arrow.clockwise.circle" : "lock.shield")
+                .font(.system(size: 44))
                 .foregroundStyle(.tint)
-            Text("Sway needs permission to record")
+            Text(monitor.needsRelaunch ? "Reopen Sway to finish" : "Sway needs permission to record")
                 .font(.title2.weight(.semibold))
-            Text("Grant these in System Settings, then quit and reopen Sway. "
-                + "macOS only applies the change to a fresh launch.")
+            Text(headline)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
-                .frame(maxWidth: 420)
+                .frame(maxWidth: 430)
 
-            VStack(spacing: 12) {
-                ForEach(CapturePermissions.Permission.allCases, id: \.self) { permission in
-                    row(permission)
-                }
+            VStack(spacing: 10) {
+                ForEach(CapturePermissions.Permission.allCases, id: \.self, content: row)
             }
-            .frame(maxWidth: 460)
+            .frame(maxWidth: 470)
 
             HStack(spacing: 12) {
-                Button("Back") { model.cancelPermissions() }
-                Button("Check Again") { model.recheckPermissions() }
-                    .keyboardShortcut(.defaultAction)
+                Button("Back") { model.leavePermissions() }
+                if monitor.needsRelaunch {
+                    Button("Reopen Sway") { monitor.relaunch() }
+                        .keyboardShortcut(.defaultAction)
+                } else {
+                    Button("Check Again") { Task { await monitor.refresh() } }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(monitor.isChecking)
+                }
+            }
+            if monitor.isChecking {
+                Text("Checking with macOS…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(30)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task { await monitor.refresh() }
+        .onChange(of: monitor.isReadyToRecord) { ready in
+            if ready { model.permissionsSatisfied() }
+        }
+        .onDisappear { monitor.stopPolling() }
     }
 
+    private var headline: String {
+        if monitor.needsRelaunch {
+            return """
+            macOS only applies a new Screen Recording permission to a fresh \
+            launch, so Sway has to be reopened before it can capture anything.
+            """
+        }
+        return "Grant these in System Settings. Sway picks up the change on its own."
+    }
+
+    @ViewBuilder
     private func row(_ permission: CapturePermissions.Permission) -> some View {
-        let granted = !model.missingPermissions.contains(permission)
-        return HStack(alignment: .top, spacing: 12) {
-            Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                .foregroundStyle(granted ? Color.green : Color.orange)
+        let status = monitor[permission]
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: symbol(for: status))
+                .foregroundStyle(tint(for: status))
                 .font(.title3)
-            VStack(alignment: .leading, spacing: 2) {
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(permission.title).font(.headline)
-                Text(permission.reason)
+                Text(detail(permission, status))
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer()
-            if !granted {
-                if model.requestingPermissions.contains(permission) {
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                if monitor.isRequesting.contains(permission) {
                     ProgressView().controlSize(.small)
-                } else {
-                    Button("Ask") { model.requestPermission(permission) }
+                } else if status == .denied {
+                    Button("Ask") { monitor.request(permission) }
+                        .buttonStyle(.borderedProminent)
                 }
-                Button("Open Settings") { model.openSettings(for: permission) }
+                if status != .granted {
+                    Button("Open Settings") { monitor.openSettings(for: permission) }
+                        .buttonStyle(.link)
+                }
             }
         }
-        .padding(14)
-        .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+        .padding(12)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func detail(
+        _ permission: CapturePermissions.Permission,
+        _ status: PermissionMonitor.Status
+    ) -> String {
+        switch status {
+        case .granted:
+            return "Granted."
+        case .grantedPendingRelaunch:
+            return "Granted - takes effect after Sway is reopened."
+        case .denied:
+            return permission.reason
+        case .unknown:
+            return """
+            macOS did not answer the permission check. If this persists, run \
+            `killall -9 replayd` in Terminal and reopen Sway.
+            """
+        }
+    }
+
+    private func symbol(for status: PermissionMonitor.Status) -> String {
+        switch status {
+        case .granted: return "checkmark.circle.fill"
+        case .grantedPendingRelaunch: return "arrow.clockwise.circle.fill"
+        case .denied: return "exclamationmark.circle.fill"
+        case .unknown: return "questionmark.circle.fill"
+        }
+    }
+
+    private func tint(for status: PermissionMonitor.Status) -> Color {
+        switch status {
+        case .granted: return .green
+        case .grantedPendingRelaunch: return .orange
+        case .denied: return .secondary
+        case .unknown: return .yellow
+        }
     }
 }
