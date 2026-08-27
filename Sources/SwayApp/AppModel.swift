@@ -29,7 +29,6 @@ final class AppModel: ObservableObject {
     /// has to be able to see and retry.
     @Published var sourcesError: String?
     let permissions = PermissionMonitor()
-    /// Bound by `MenuBarExtra`, so the menu bar item only exists while recording.
     @Published var isRecording = false
     @Published var elapsed: TimeInterval = 0
     @Published var errorMessage: String?

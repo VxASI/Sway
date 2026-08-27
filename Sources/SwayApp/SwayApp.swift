@@ -21,13 +21,10 @@ struct SwayApp: App {
             }
         }
 
-        // While recording, the main window is hidden and the menu bar item is
-        // the only piece of Sway on screen.
-        MenuBarExtra("Sway", systemImage: "record.circle.fill", isInserted: $model.isRecording) {
-            Text(model.elapsedLabel)
-            Divider()
-            Button("Stop Recording (⇧⌘S)") { model.stopRecording() }
-        }
+        // No `MenuBarExtra` here on purpose. Its `isInserted:` binding drives
+        // SwiftUI into an endless update loop when it is backed by a published
+        // property, which pegs the main thread at 100% CPU and beachballs the
+        // window. The floating panel is the recording control instead.
     }
 }
 
