@@ -51,7 +51,11 @@ final class AppModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            Task { @MainActor in self.recheckPermissions() }
+            Task { @MainActor in
+                // Only while the permissions screen is up: rechecking on every
+                // activation would run a TCC preflight the user never asked for.
+                if self.phase == .permissions { self.recheckPermissions() }
+            }
         }
     }
 
@@ -76,13 +80,19 @@ final class AppModel: ObservableObject {
     /// calling ScreenCaptureKit without it can block instead of failing, which
     /// is indistinguishable from a hung app.
     func showPicker() {
-        missingPermissions = CapturePermissions.missing
-        guard missingPermissions.isEmpty else {
-            phase = .permissions
-            return
-        }
+        // Straight to the picker: the permission check is asynchronous, and the
+        // picker itself reports a missing permission. Waiting for the check
+        // before showing anything is what made Record feel dead.
         phase = .picking
         reloadSources()
+        Task { await self.refreshPermissions() }
+    }
+
+    @discardableResult
+    private func refreshPermissions() async -> [CapturePermissions.Permission] {
+        let missing = await CapturePermissions.missing()
+        self.missingPermissions = missing
+        return missing
     }
 
     /// Triggers the system prompt for one permission. The request itself blocks
@@ -99,10 +109,12 @@ final class AppModel: ObservableObject {
     }
 
     func recheckPermissions() {
-        missingPermissions = CapturePermissions.missing
-        if missingPermissions.isEmpty, phase == .permissions {
-            phase = .picking
-            reloadSources()
+        Task {
+            let missing = await self.refreshPermissions()
+            if missing.isEmpty, self.phase == .permissions {
+                self.phase = .picking
+                self.reloadSources()
+            }
         }
     }
 
@@ -136,7 +148,7 @@ final class AppModel: ObservableObject {
                 }
                 self.loadThumbnails(for: loaded)
             } catch CaptureSourceError.screenRecordingPermissionMissing {
-                self.missingPermissions = CapturePermissions.missing
+                await self.refreshPermissions()
                 self.phase = .permissions
             } catch {
                 self.sourcesError = "Could not list what can be recorded.\n\(error)"
@@ -164,12 +176,6 @@ final class AppModel: ObservableObject {
 
     func startRecording() {
         guard let source = selectedSource else { return }
-        missingPermissions = CapturePermissions.missing
-        guard missingPermissions.isEmpty else {
-            phase = .permissions
-            return
-        }
-
         let options = ScreenRecorderOptions(
             target: source.target,
             frameRate: 60,
@@ -180,6 +186,12 @@ final class AppModel: ObservableObject {
         self.session = session
 
         Task {
+            let missing = await self.refreshPermissions()
+            guard missing.isEmpty else {
+                self.session = nil
+                self.phase = .permissions
+                return
+            }
             do {
                 try await session.start()
                 self.phase = .recording
@@ -188,9 +200,9 @@ final class AppModel: ObservableObject {
                 self.beginRecordingUI()
             } catch {
                 self.session = nil
-                self.missingPermissions = CapturePermissions.missing
+                let missing = await self.refreshPermissions()
                 self.errorMessage = "Could not start recording.\n\n\(error)"
-                self.phase = self.missingPermissions.isEmpty ? .picking : .permissions
+                self.phase = missing.isEmpty ? .picking : .permissions
             }
         }
     }

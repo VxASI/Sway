@@ -56,14 +56,19 @@ public actor CaptureSourceCatalog {
     /// Lists displays and windows. Fast: no screenshots are taken here.
     public func sources(excludingBundleIdentifiers excluded: [String] = []) async throws -> [CaptureSource] {
         // Without this check `SCShareableContent` can sit there for a long time
-        // instead of failing, which looks like a hung picker.
-        guard CapturePermissions.hasScreenRecording else {
+        // instead of failing, which looks like a hung picker. An inconclusive
+        // answer falls through: the fetch below has its own timeout.
+        if await CapturePermissions.status(.screenRecording) == false {
             throw CaptureSourceError.screenRecordingPermissionMissing
         }
 
         let content = try await shareableContent()
         let displayIDs = content.displays.map(\.displayID)
-        let names = await MainActor.run { CaptureSourceCatalog.displayNames(for: displayIDs) }
+        // Bounded, because the name lookup needs the main actor and a busy main
+        // actor must cost us the pretty names, not the whole list.
+        let names = (try? await CaptureSourceCatalog.withTimeout(seconds: 3) {
+            await MainActor.run { CaptureSourceCatalog.displayNames(for: displayIDs) }
+        }) ?? [:]
         var sources = content.displays.map { display in
             CaptureSource(
                 id: "display-\(display.displayID)",
@@ -105,7 +110,6 @@ public actor CaptureSourceCatalog {
     /// A preview image for one source. Returns `nil` rather than throwing: a
     /// missing thumbnail must never stop the user from picking something.
     public func thumbnail(for target: CaptureTarget, maximumWidth: Int = 480) async -> CGImage? {
-        guard CapturePermissions.hasScreenRecording else { return nil }
         guard let content = try? await shareableContent() else { return nil }
 
         switch target {
