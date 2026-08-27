@@ -107,7 +107,7 @@ public actor CaptureSourceCatalog {
                 height: Int(window.frame.height)
             )
         }
-        log.info("listed \(sources.count, privacy: .public) capture sources")
+        Self.log.info("listed \(sources.count, privacy: .public) capture sources")
         return sources
     }
 
@@ -177,11 +177,11 @@ public actor CaptureSourceCatalog {
         }
     }
 
-    private let log = Logger(subsystem: "ai.sway.Sway", category: "capture-sources")
+    private static let log = Logger(subsystem: "ai.sway.Sway", category: "capture-sources")
 
     private func shareableContent() async throws -> SCShareableContent {
         if let content { return content }
-        log.info("fetching shareable content")
+        Self.log.info("fetching shareable content")
         let fetched = try await CaptureSourceCatalog.shareableContentWithDeadline(seconds: 8)
         content = fetched
         return fetched
