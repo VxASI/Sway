@@ -28,6 +28,7 @@ final class AppModel: ObservableObject {
     /// has to be able to see and retry.
     @Published var sourcesError: String?
     @Published var missingPermissions: [CapturePermissions.Permission] = []
+    @Published var requestingPermissions: Set<CapturePermissions.Permission> = []
     /// Bound by `MenuBarExtra`, so the menu bar item only exists while recording.
     @Published var isRecording = false
     @Published var elapsed: TimeInterval = 0
@@ -40,6 +41,19 @@ final class AppModel: ObservableObject {
     private var timer: AnyCancellable?
     private var hotKey: StopHotKey?
     private var thumbnailTask: Task<Void, Never>?
+
+    init() {
+        // Granting happens in System Settings, so the app finds out it now has
+        // permission when the user switches back to it.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.recheckPermissions() }
+        }
+    }
 
     var isBusy: Bool { phase == .recording || phase == .processing }
 
@@ -62,9 +76,6 @@ final class AppModel: ObservableObject {
     /// calling ScreenCaptureKit without it can block instead of failing, which
     /// is indistinguishable from a hung app.
     func showPicker() {
-        for permission in CapturePermissions.missing {
-            CapturePermissions.request(permission)
-        }
         missingPermissions = CapturePermissions.missing
         guard missingPermissions.isEmpty else {
             phase = .permissions
@@ -74,9 +85,22 @@ final class AppModel: ObservableObject {
         reloadSources()
     }
 
+    /// Triggers the system prompt for one permission. The request itself blocks
+    /// its thread until the user answers, so it is never awaited on the main
+    /// thread - that is what froze the app behind the prompt.
+    func requestPermission(_ permission: CapturePermissions.Permission) {
+        guard !requestingPermissions.contains(permission) else { return }
+        requestingPermissions.insert(permission)
+        Task {
+            await CapturePermissions.request(permission)
+            self.requestingPermissions.remove(permission)
+            self.recheckPermissions()
+        }
+    }
+
     func recheckPermissions() {
         missingPermissions = CapturePermissions.missing
-        if missingPermissions.isEmpty {
+        if missingPermissions.isEmpty, phase == .permissions {
             phase = .picking
             reloadSources()
         }

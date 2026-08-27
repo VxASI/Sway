@@ -50,6 +50,11 @@ struct PermissionsView: View {
             }
             Spacer()
             if !granted {
+                if model.requestingPermissions.contains(permission) {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Ask") { model.requestPermission(permission) }
+                }
                 Button("Open Settings") { model.openSettings(for: permission) }
             }
         }

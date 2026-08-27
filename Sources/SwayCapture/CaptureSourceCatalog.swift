@@ -3,6 +3,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import ScreenCaptureKit
+import os
 
 /// One thing the user can pick in the capture picker: a whole display or a
 /// single window, with the name shown next to it. Thumbnails are fetched
@@ -61,12 +62,14 @@ public actor CaptureSourceCatalog {
         }
 
         let content = try await shareableContent()
+        let displayIDs = content.displays.map(\.displayID)
+        let names = await MainActor.run { CaptureSourceCatalog.displayNames(for: displayIDs) }
         var sources = content.displays.map { display in
             CaptureSource(
                 id: "display-\(display.displayID)",
                 kind: .display,
                 target: .display(display.displayID),
-                name: CaptureSourceCatalog.displayName(for: display.displayID),
+                name: names[display.displayID] ?? "Display \(display.displayID)",
                 subtitle: "\(display.width) x \(display.height)",
                 width: display.width,
                 height: display.height
@@ -95,6 +98,7 @@ public actor CaptureSourceCatalog {
                 height: Int(window.frame.height)
             )
         }
+        log.info("listed \(sources.count, privacy: .public) capture sources")
         return sources
     }
 
@@ -142,20 +146,34 @@ public actor CaptureSourceCatalog {
         content = nil
     }
 
-    /// The name macOS shows for a display ("Built-in Display", "LG Monitor").
-    public static func displayName(for displayID: CGDirectDisplayID) -> String {
-        let screen = NSScreen.screens.first { screen in
-            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
-                .uint32Value == displayID
+    /// The names macOS shows for displays ("Built-in Display", "LG Monitor").
+    /// Main actor because `NSScreen` is AppKit, which must not be touched from
+    /// the actor's background executor.
+    @MainActor
+    public static func displayNames(
+        for displayIDs: [CGDirectDisplayID]
+    ) -> [CGDirectDisplayID: String] {
+        let screens = NSScreen.screens
+        return displayIDs.reduce(into: [:]) { result, displayID in
+            let screen = screens.first { screen in
+                (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
+                    .uint32Value == displayID
+            }
+            if let name = screen?.localizedName, !name.isEmpty {
+                result[displayID] = name
+            } else {
+                result[displayID] = CGDisplayIsBuiltin(displayID) != 0
+                    ? "Built-in Display"
+                    : "Display \(displayID)"
+            }
         }
-        if let name = screen?.localizedName, !name.isEmpty {
-            return name
-        }
-        return CGDisplayIsBuiltin(displayID) != 0 ? "Built-in Display" : "Display \(displayID)"
     }
+
+    private let log = Logger(subsystem: "ai.sway.Sway", category: "capture-sources")
 
     private func shareableContent() async throws -> SCShareableContent {
         if let content { return content }
+        log.info("fetching shareable content")
         let fetched = try await CaptureSourceCatalog.withTimeout(seconds: 10) {
             try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         }

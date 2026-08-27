@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import os
 
 /// The two TCC permissions a Sway recording needs, checked before anything is
 /// started rather than discovered as a hang or a failed recording.
@@ -61,14 +62,31 @@ public enum CapturePermissions {
 
     /// Shows the system prompt if macOS has never asked for this permission.
     /// Returns whether it is granted right now: after the user flips the switch
-    /// macOS restarts the app, so a `false` here is normal and not an error.
+    /// macOS wants the app relaunched, so a `false` here is normal.
+    ///
+    /// `CGRequestScreenCaptureAccess` and `CGRequestListenEventAccess` block the
+    /// calling thread until the user dismisses the system dialog, so they are
+    /// run off the main thread - calling them from the main thread beachballs
+    /// the whole app behind the prompt.
     @discardableResult
-    public static func request(_ permission: Permission) -> Bool {
-        switch permission {
-        case .screenRecording: return CGRequestScreenCaptureAccess()
-        case .inputMonitoring: return CGRequestListenEventAccess()
+    public static func request(_ permission: Permission) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                log.info("requesting \(permission.rawValue, privacy: .public)")
+                let granted: Bool
+                switch permission {
+                case .screenRecording: granted = CGRequestScreenCaptureAccess()
+                case .inputMonitoring: granted = CGRequestListenEventAccess()
+                }
+                log.info(
+                    "\(permission.rawValue, privacy: .public) granted: \(granted, privacy: .public)"
+                )
+                continuation.resume(returning: granted)
+            }
         }
     }
+
+    public static let log = Logger(subsystem: "ai.sway.Sway", category: "permissions")
 
     public static func openSettings(for permission: Permission) {
         guard let url = permission.settingsURL else { return }
