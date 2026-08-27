@@ -47,8 +47,17 @@ final class PermissionMonitor: ObservableObject {
 
     func refresh() async {
         isChecking = true
-        for permission in CapturePermissions.Permission.allCases {
-            let granted = await CapturePermissions.preflight(permission)
+        // Concurrently: one permission that is slow to answer must not add its
+        // wait to the other's.
+        let answers = await withTaskGroup(
+            of: (CapturePermissions.Permission, Bool?).self
+        ) { group -> [(CapturePermissions.Permission, Bool?)] in
+            for permission in CapturePermissions.Permission.allCases {
+                group.addTask { (permission, await CapturePermissions.preflight(permission)) }
+            }
+            return await group.reduce(into: []) { $0.append($1) }
+        }
+        for (permission, granted) in answers {
             status[permission] = resolve(permission, granted: granted)
         }
         isChecking = false

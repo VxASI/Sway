@@ -60,20 +60,50 @@ public enum CapturePermissions {
     /// Whether the permission is granted, or `nil` if the system did not answer
     /// in time.
     ///
-    /// Runs off the main thread: these preflights talk to the TCC daemon, and a
-    /// busy or wedged `tccd` would otherwise freeze the UI. An unanswered
-    /// preflight is reported as `nil` rather than as a denial, because the two
-    /// need very different things from the user.
+    /// Deliberately avoids `CGPreflightScreenCaptureAccess`. That call is a
+    /// round trip to the TCC daemon, and on a machine whose `tccd` is unhappy -
+    /// which is easy to provoke by force-quitting an app mid-prompt - it simply
+    /// never returns. Screen Recording is inferred from the window server
+    /// instead, which is local, instant, and never prompts.
+    ///
+    /// Everything still runs off the main thread with a deadline, and an
+    /// unanswered check reports `nil` rather than a denial: "macOS won't say"
+    /// and "you said no" need different things from the user.
     public static func preflight(
         _ permission: Permission,
-        timeout: TimeInterval = 10
+        timeout: TimeInterval = 3
     ) async -> Bool? {
         await bounded(permission, timeout: timeout) {
             switch permission {
-            case .screenRecording: return CGPreflightScreenCaptureAccess()
+            case .screenRecording: return canReadOtherWindowTitles()
             case .inputMonitoring: return CGPreflightListenEventAccess()
             }
         }
+    }
+
+    /// Screen Recording, inferred from what the window server is willing to
+    /// tell us.
+    ///
+    /// Window *titles* belonging to other applications are only readable with
+    /// Screen Recording permission; without it the list still comes back, but
+    /// with the names stripped. Windows owned by Sway, and by processes we
+    /// cannot inspect (the window server's own menu bar windows), prove
+    /// nothing and are skipped.
+    private static func canReadOtherWindowTitles() -> Bool {
+        guard let windows = CGWindowListCopyWindowInfo(
+            .optionOnScreenOnly,
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        for window in windows {
+            guard let pid = window[kCGWindowOwnerPID as String] as? pid_t, pid != ownPID,
+                  NSRunningApplication(processIdentifier: pid) != nil else { continue }
+            if let title = window[kCGWindowName as String] as? String, !title.isEmpty {
+                return true
+            }
+        }
+        return false
     }
 
     /// Asks macOS to show its permission dialog. Returns once the user has

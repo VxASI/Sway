@@ -70,24 +70,16 @@ final class AppModel: ObservableObject {
 
     // MARK: - Permissions
 
-    /// Record always lands somewhere immediately: the picker if the permissions
-    /// checked out at launch, the permissions screen otherwise. Nothing here
-    /// waits on the system.
+    /// Record goes straight to the picker and starts listing sources.
+    ///
+    /// No permission check gates this: listing the sources *is* the permission
+    /// check, it is the operation the user asked for, and it is bounded. Asking
+    /// a possibly-unresponsive TCC daemon first only adds a way to get stuck
+    /// before anything useful has happened.
     func showPicker() {
         log.info("record tapped")
-        Task {
-            await self.permissions.refresh()
-            if self.permissions.isReadyToRecord {
-                self.phase = .picking
-                self.reloadSources()
-            } else {
-                self.phase = .permissions
-                self.permissions.startPolling()
-            }
-        }
-        // Shown while the checks run, so the button responds on the first click.
         phase = .picking
-        isLoadingSources = true
+        reloadSources()
     }
 
     func showPermissions() {
