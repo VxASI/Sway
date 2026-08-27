@@ -39,6 +39,45 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' .build/Sway.app/Contents/Info.plist
           codesign --verify --verbose .build/Sway.app
 
+      # Compiling proves nothing about whether the app comes up. This launches
+      # it for real and fails if the process dies or if its main thread is
+      # stuck somewhere other than the run loop.
+      - name: Launch smoke test
+        run: |
+          set -uo pipefail
+          open .build/Sway.app
+          sleep 10
+
+          PID="$(pgrep -x Sway || true)"
+          if [ -z "$PID" ]; then
+            echo "::error::Sway is not running 10s after launch"
+            log show --predicate 'subsystem == "ai.sway.Sway"' --last 3m --info || true
+            log show --predicate 'process == "Sway"' --last 3m --info | tail -50 || true
+            exit 1
+          fi
+          echo "Sway is running as pid $PID"
+
+          log show --predicate 'subsystem == "ai.sway.Sway"' --last 3m --info || true
+
+          sample "$PID" 3 -file /tmp/sway-sample.txt >/dev/null 2>&1 || true
+          MAIN="$(awk '/com.apple.main-thread/,/^$/' /tmp/sway-sample.txt)"
+          echo "$MAIN"
+          if echo "$MAIN" | grep -q '__CFRunLoopServiceMachPort\|mach_msg2_trap'; then
+            echo "main thread is parked in its run loop"
+          else
+            echo "::error::main thread is not idle - the UI would be beachballing"
+            exit 1
+          fi
+
+          osascript -e 'quit app "Sway"' || kill "$PID"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launch-sample
+          path: /tmp/sway-sample.txt
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         with:
           name: Sway.app
