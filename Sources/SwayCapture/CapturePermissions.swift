@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import ScreenCaptureKit
 import os
 
 /// The two TCC permissions a Sway recording needs, checked before anything is
@@ -45,41 +46,68 @@ public enum CapturePermissions {
         }
     }
 
-    /// Whether a permission is granted.
+    /// Whether a permission is granted, or `nil` when it could not be decided
+    /// in time.
     ///
-    /// Never call this on the main thread: the preflight talks to the TCC
-    /// daemon and the window server, and when either is busy or the app's
-    /// record is in a half-granted state it can block for a long time - which
-    /// on the main thread is a frozen window with a spinning cursor. Use
-    /// ``status(_:)`` from the UI.
-    public static func isGrantedBlocking(_ permission: Permission) -> Bool {
+    /// This deliberately does **not** use `CGPreflightScreenCaptureAccess` or
+    /// `CGPreflightListenEventAccess`: when the app's TCC record is in a
+    /// half-granted state those calls can block indefinitely no matter which
+    /// thread they run on. Each permission is decided instead by attempting the
+    /// cheapest form of the thing it actually protects.
+    public static func status(
+        _ permission: Permission,
+        timeout: TimeInterval = 5
+    ) async -> Bool? {
         switch permission {
-        case .screenRecording: return CGPreflightScreenCaptureAccess()
-        case .inputMonitoring: return CGPreflightListenEventAccess()
+        case .screenRecording:
+            // Listing shareable content is the same gate recording goes
+            // through, and it fails with an error rather than blocking.
+            return await bounded(permission, timeout: timeout) {
+                do {
+                    _ = try await SCShareableContent.excludingDesktopWindows(
+                        false,
+                        onScreenWindowsOnly: true
+                    )
+                    return true
+                } catch {
+                    log.info("screen recording probe failed: \(error, privacy: .public)")
+                    return false
+                }
+            }
+        case .inputMonitoring:
+            // Creating the listen-only tap is exactly what the cursor recorder
+            // does, and it returns nil instead of blocking when denied.
+            return await bounded(permission, timeout: timeout) {
+                guard let tap = CGEvent.tapCreate(
+                    tap: .cgSessionEventTap,
+                    place: .headInsertEventTap,
+                    options: .listenOnly,
+                    eventsOfInterest: CGEventMask(1 << CGEventType.mouseMoved.rawValue),
+                    callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
+                    userInfo: nil
+                ) else { return false }
+                CFMachPortInvalidate(tap)
+                return true
+            }
         }
     }
 
-    /// Off-main-thread permission check, bounded so a wedged TCC daemon costs a
-    /// second and an "unknown" answer rather than the whole app.
-    public static func status(
+    /// Runs a probe with a deadline so no permission question can freeze the UI.
+    private static func bounded(
         _ permission: Permission,
-        timeout: TimeInterval = 2
+        timeout: TimeInterval,
+        probe: @escaping @Sendable () async -> Bool
     ) async -> Bool? {
-        await withCheckedContinuation { continuation in
-            let once = ResumeOnce()
-            let finish: @Sendable (Bool?) -> Void = { value in
-                guard once.claim() else { return }
-                continuation.resume(returning: value)
+        await withTaskGroup(of: Bool?.self) { group in
+            group.addTask { await probe() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                log.error("\(permission.rawValue, privacy: .public) probe timed out")
+                return nil
             }
-            DispatchQueue.global(qos: .userInitiated).async {
-                finish(isGrantedBlocking(permission))
-            }
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
-                log.error(
-                    "preflight for \(permission.rawValue, privacy: .public) timed out"
-                )
-                finish(nil)
-            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
         }
     }
 
@@ -94,48 +122,23 @@ public enum CapturePermissions {
         return result
     }
 
-    /// Shows the system prompt if macOS has never asked for this permission.
-    /// Returns whether it is granted right now: after the user flips the switch
-    /// macOS wants the app relaunched, so a `false` here is normal.
+    /// Asks macOS for the permission.
     ///
-    /// `CGRequestScreenCaptureAccess` and `CGRequestListenEventAccess` block the
-    /// calling thread until the user dismisses the system dialog, so they are
-    /// run off the main thread - calling them from the main thread beachballs
-    /// the whole app behind the prompt.
+    /// This is the same probe as ``status(_:)`` on purpose: attempting the
+    /// protected operation is what makes macOS show its prompt, and unlike
+    /// `CGRequestScreenCaptureAccess` / `CGRequestListenEventAccess` it cannot
+    /// wedge the app waiting on a dialog that may never come. A `false` right
+    /// after the user allows it is expected - macOS applies the grant on the
+    /// next launch.
     @discardableResult
     public static func request(_ permission: Permission) async -> Bool {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                log.info("requesting \(permission.rawValue, privacy: .public)")
-                let granted: Bool
-                switch permission {
-                case .screenRecording: granted = CGRequestScreenCaptureAccess()
-                case .inputMonitoring: granted = CGRequestListenEventAccess()
-                }
-                log.info(
-                    "\(permission.rawValue, privacy: .public) granted: \(granted, privacy: .public)"
-                )
-                continuation.resume(returning: granted)
-            }
-        }
+        log.info("requesting \(permission.rawValue, privacy: .public)")
+        let granted = await status(permission, timeout: 60) ?? false
+        log.info("\(permission.rawValue, privacy: .public) granted: \(granted, privacy: .public)")
+        return granted
     }
 
     public static let log = Logger(subsystem: "ai.sway.Sway", category: "permissions")
-
-    /// Whichever of the check and the timeout finishes first resumes the
-    /// continuation; the other must not.
-    private final class ResumeOnce: @unchecked Sendable {
-        private let lock = NSLock()
-        private var claimed = false
-
-        func claim() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            if claimed { return false }
-            claimed = true
-            return true
-        }
-    }
 
     public static func openSettings(for permission: Permission) {
         guard let url = permission.settingsURL else { return }

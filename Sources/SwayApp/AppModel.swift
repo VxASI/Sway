@@ -85,7 +85,6 @@ final class AppModel: ObservableObject {
         // before showing anything is what made Record feel dead.
         phase = .picking
         reloadSources()
-        Task { await self.refreshPermissions() }
     }
 
     @discardableResult
@@ -186,9 +185,11 @@ final class AppModel: ObservableObject {
         self.session = session
 
         Task {
-            let missing = await self.refreshPermissions()
-            guard missing.isEmpty else {
+            // Only the cursor tap is checked here: Screen Recording already
+            // proved itself by listing the sources behind this button.
+            if await CapturePermissions.status(.inputMonitoring) == false {
                 self.session = nil
+                self.missingPermissions = [.inputMonitoring]
                 self.phase = .permissions
                 return
             }

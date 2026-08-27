@@ -55,13 +55,6 @@ public actor CaptureSourceCatalog {
 
     /// Lists displays and windows. Fast: no screenshots are taken here.
     public func sources(excludingBundleIdentifiers excluded: [String] = []) async throws -> [CaptureSource] {
-        // Without this check `SCShareableContent` can sit there for a long time
-        // instead of failing, which looks like a hung picker. An inconclusive
-        // answer falls through: the fetch below has its own timeout.
-        if await CapturePermissions.status(.screenRecording) == false {
-            throw CaptureSourceError.screenRecordingPermissionMissing
-        }
-
         let content = try await shareableContent()
         let displayIDs = content.displays.map(\.displayID)
         // Bounded, because the name lookup needs the main actor and a busy main
@@ -178,8 +171,21 @@ public actor CaptureSourceCatalog {
     private func shareableContent() async throws -> SCShareableContent {
         if let content { return content }
         log.info("fetching shareable content")
-        let fetched = try await CaptureSourceCatalog.withTimeout(seconds: 10) {
-            try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let fetched: SCShareableContent
+        do {
+            fetched = try await CaptureSourceCatalog.withTimeout(seconds: 10) {
+                try await SCShareableContent.excludingDesktopWindows(
+                    true,
+                    onScreenWindowsOnly: true
+                )
+            }
+        } catch is CaptureSourceError {
+            throw CaptureSourceError.timedOut
+        } catch {
+            // ScreenCaptureKit refuses to enumerate anything without Screen
+            // Recording, so any other failure here is that permission.
+            log.error("shareable content failed: \(error, privacy: .public)")
+            throw CaptureSourceError.screenRecordingPermissionMissing
         }
         content = fetched
         return fetched
