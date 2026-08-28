@@ -20,14 +20,6 @@ struct SwayApp: App {
                     .disabled(!model.isRecording)
             }
         }
-
-        // While recording, the main window is hidden and the menu bar item is
-        // the only piece of Sway on screen.
-        MenuBarExtra("Sway", systemImage: "record.circle.fill", isInserted: $model.isRecording) {
-            Text(model.elapsedLabel)
-            Divider()
-            Button("Stop Recording (⇧⌘S)") { model.stopRecording() }
-        }
     }
 }
 
