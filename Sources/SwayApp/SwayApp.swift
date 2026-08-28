@@ -20,6 +20,11 @@ struct SwayApp: App {
                     .disabled(!model.isRecording)
             }
         }
+
+        // No `MenuBarExtra` here on purpose. Its `isInserted:` binding drives
+        // SwiftUI into an endless update loop when it is backed by a published
+        // property, which pegs the main thread at 100% CPU and beachballs the
+        // window. The floating panel is the recording control instead.
     }
 }
 
