@@ -21,10 +21,27 @@ public enum CameraFrameRenderer {
         let zoom = max(1, camera.zoom)
 
         // Camera coordinates are top-left origin; CoreImage is bottom-left.
-        let cropWidth = extent.width / zoom
-        let cropHeight = extent.height / zoom
-        let cropX = extent.origin.x + camera.centerX * extent.width - cropWidth / 2
-        let cropY = extent.origin.y + (1 - camera.centerY) * extent.height - cropHeight / 2
+        var cropWidth = extent.width / zoom
+        var cropHeight = extent.height / zoom
+
+        // Aspect-fill: when the output aspect differs from the capture's, the
+        // viewport is narrowed on one axis (never stretched), staying centered
+        // on the camera.
+        let targetAspect = outputSize.width / outputSize.height
+        let viewportAspect = cropWidth / cropHeight
+        if abs(targetAspect - viewportAspect) > 0.001 {
+            if targetAspect < viewportAspect {
+                cropWidth = cropHeight * targetAspect
+            } else {
+                cropHeight = cropWidth / targetAspect
+            }
+        }
+
+        var cropX = extent.origin.x + camera.centerX * extent.width - cropWidth / 2
+        var cropY = extent.origin.y + (1 - camera.centerY) * extent.height - cropHeight / 2
+        // Keep the (possibly narrowed) viewport inside the captured frame.
+        cropX = min(max(cropX, extent.minX), max(extent.minX, extent.maxX - cropWidth))
+        cropY = min(max(cropY, extent.minY), max(extent.minY, extent.maxY - cropHeight))
         let cropRect = CGRect(x: cropX, y: cropY, width: cropWidth, height: cropHeight)
             .intersection(extent)
         guard !cropRect.isNull, cropRect.width > 0, cropRect.height > 0 else { return source }

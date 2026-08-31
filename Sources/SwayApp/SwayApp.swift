@@ -40,6 +40,8 @@ struct RootView: View {
                 PermissionsView()
             case .picking:
                 CapturePickerView()
+            case .countdown:
+                CountdownPlaceholderView()
             case .recording:
                 RecordingPlaceholderView()
             case .processing:
@@ -48,6 +50,8 @@ struct RootView: View {
                 EditorView()
             }
         }
+        .background(Color(red: 0.09, green: 0.09, blue: 0.11))
+        .preferredColorScheme(.dark)
         .alert("Sway", isPresented: model.errorBinding) {
             Button("OK", role: .cancel) { model.errorMessage = nil }
         } message: {
@@ -56,22 +60,64 @@ struct RootView: View {
     }
 }
 
+/// The welcome screen doubles as the recordings library: record something new,
+/// or reopen anything made before.
 struct WelcomeView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "video.circle.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.tint)
-            Text("Sway")
-                .font(.largeTitle.weight(.semibold))
-            Text("Record a display or a window, then add a focus range.")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Sway")
+                        .font(.system(size: 34, weight: .semibold))
+                    Text("Record your screen, then direct the camera afterwards.")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 36)
+
+                HStack(spacing: 12) {
+                    Button {
+                        model.showPicker()
+                    } label: {
+                        Label("Record", systemImage: "record.circle")
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(.red)
+
+                    Button("Open Recording…") { model.openBundle() }
+                        .controlSize(.large)
+                }
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Recent recordings")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    LibraryGrid()
+                }
+            }
+            .padding(.horizontal, 36)
+            .padding(.bottom, 36)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onAppear { model.refreshLibrary() }
+    }
+}
+
+struct CountdownPlaceholderView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+            Text("Starting recording…")
                 .foregroundStyle(.secondary)
-            Button("Record") { model.showPicker() }
-                .keyboardShortcut(.defaultAction)
-                .controlSize(.large)
-            Button("Open Recording…") { model.openBundle() }
+            Button("Cancel") { model.cancelCountdown() }
                 .buttonStyle(.link)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

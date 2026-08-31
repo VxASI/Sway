@@ -28,24 +28,118 @@ final class FocusRangeTests: XCTestCase {
         XCTAssertEqual(range.duration, 0.5, accuracy: 1e-9)
     }
 
-    func testInitialEditProposesRangeAroundInteractions() {
+    func testInitialEditProposesRangeAroundInteractions() throws {
         var events = movingTrack(duration: 10).events
         events.append(CursorEvent(time: 6.0, x: 0.6, y: 0.5, type: .leftMouseDown))
         events.append(CursorEvent(time: 6.4, x: 0.61, y: 0.51, type: .leftMouseDown))
         let edit = SwayEdit.initial(duration: 10, track: CursorTrack(events: events.sorted { $0.time < $1.time }))
 
-        let focus = try? XCTUnwrap(edit.focus)
+        let segment = try XCTUnwrap(edit.segments.first)
         XCTAssertEqual(edit.trimStart, 0)
         XCTAssertEqual(edit.trimEnd, 10)
-        XCTAssertNotNil(focus)
-        XCTAssertTrue(focus?.contains(6.2) == true)
+        XCTAssertEqual(segment.kind, .followCursor)
+        XCTAssertTrue(segment.contains(6.2))
     }
 
     func testInitialEditStillProposesARangeWithoutInteractions() throws {
         let edit = SwayEdit.initial(duration: 8, track: movingTrack(duration: 8))
-        let focus = try XCTUnwrap(edit.focus)
-        XCTAssertGreaterThan(focus.duration, 0)
-        XCTAssertLessThanOrEqual(focus.end, 8)
+        let segment = try XCTUnwrap(edit.segments.first)
+        XCTAssertGreaterThan(segment.duration, 0)
+        XCTAssertLessThanOrEqual(segment.end, 8)
+    }
+
+    func testLegacyEditWithFocusDecodesIntoAFollowSegment() throws {
+        let legacy = Data("""
+        {"trimStart":1,"trimEnd":9,"focus":{"start":3,"end":6,"zoom":2.5}}
+        """.utf8)
+        let edit = try JSONDecoder().decode(SwayEdit.self, from: legacy)
+        XCTAssertEqual(edit.trimStart, 1)
+        XCTAssertEqual(edit.trimEnd, 9)
+        let segment = try XCTUnwrap(edit.segments.first)
+        XCTAssertEqual(segment.kind, .followCursor)
+        XCTAssertEqual(segment.start, 3)
+        XCTAssertEqual(segment.end, 6)
+        XCTAssertEqual(segment.zoom, 2.5)
+    }
+}
+
+final class EffectSegmentTests: XCTestCase {
+    func testResolvedSortsClampsAndRemovesOverlaps() {
+        let segments = [
+            EffectSegment(kind: .zoom, start: 5, end: 8),
+            EffectSegment(kind: .followCursor, start: -1, end: 6),
+            EffectSegment(kind: .zoom, start: 5.9, end: 6.0) // collapses below minimum
+        ]
+        let resolved = EffectSegment.resolved(segments, duration: 7)
+
+        XCTAssertEqual(resolved.count, 2)
+        XCTAssertEqual(resolved[0].start, 0)
+        XCTAssertEqual(resolved[0].end, 6)
+        XCTAssertEqual(resolved[1].start, 6)
+        XCTAssertEqual(resolved[1].end, 7)
+    }
+
+    func testZoomSegmentHoldsItsFocalPoint() throws {
+        let track = movingTrack(duration: 10)
+        let segment = EffectSegment(
+            kind: .zoom, start: 3, end: 8, zoom: 2, centerX: 0.7, centerY: 0.3
+        )
+        let path = CameraPathGenerator().generate(track: track, duration: 10, segments: [segment])
+
+        let inside = try XCTUnwrap(path.state(at: 6.5))
+        XCTAssertEqual(inside.zoom, 2, accuracy: 0.05)
+        // The camera composes around the fixed focal point regardless of where
+        // the cursor is sweeping.
+        XCTAssertEqual(inside.centerX, 0.7, accuracy: 0.05)
+        XCTAssertEqual(inside.centerY, 0.3, accuracy: 0.05)
+
+        let before = try XCTUnwrap(path.state(at: 1))
+        XCTAssertEqual(before.zoom, 1, accuracy: 0.01)
+    }
+
+    func testFollowSegmentTracksTheCursor() throws {
+        let track = movingTrack(duration: 10)
+        let segment = EffectSegment(kind: .followCursor, start: 3, end: 8, zoom: 2)
+        let path = CameraPathGenerator().generate(track: track, duration: 10, segments: [segment])
+
+        let inside = try XCTUnwrap(path.state(at: 6.5))
+        let cursor = try XCTUnwrap(track.position(at: 6.5))
+        XCTAssertEqual(inside.zoom, 2, accuracy: 0.05)
+        XCTAssertEqual(inside.centerX, cursor.x, accuracy: 0.15)
+        XCTAssertEqual(inside.centerY, cursor.y, accuracy: 0.15)
+    }
+
+    func testSmoothingSoftensTheFollow() throws {
+        let track = movingTrack(duration: 10)
+        func lag(smoothing: Double) throws -> Double {
+            let segment = EffectSegment(
+                kind: .followCursor, start: 2, end: 9, zoom: 2, smoothing: smoothing
+            )
+            let path = CameraPathGenerator().generate(track: track, duration: 10, segments: [segment])
+            // Sampled during the move-in transient, where spring stiffness
+            // shows: the smoother camera is still farther from the cursor.
+            let state = try XCTUnwrap(path.state(at: 2.4))
+            let cursor = try XCTUnwrap(track.position(at: 2.4))
+            return abs(state.centerX - cursor.x)
+        }
+        XCTAssertLessThan(try lag(smoothing: 0), try lag(smoothing: 1))
+    }
+
+    func testBackToBackSegmentsTransitionSmoothly() {
+        let track = movingTrack(duration: 10)
+        let segments = EffectSegment.resolved([
+            EffectSegment(kind: .zoom, start: 2, end: 5, zoom: 2.5, centerX: 0.3, centerY: 0.3),
+            EffectSegment(kind: .followCursor, start: 5, end: 8, zoom: 2)
+        ], duration: 10)
+        let path = CameraPathGenerator().generate(track: track, duration: 10, segments: segments)
+
+        var previous = path.keyframes[0]
+        for keyframe in path.keyframes.dropFirst() {
+            XCTAssertLessThan(abs(keyframe.zoom - previous.zoom), 0.15, "zoom jumped at \(keyframe.time)")
+            XCTAssertLessThan(abs(keyframe.centerX - previous.centerX), 0.05)
+            XCTAssertLessThan(abs(keyframe.centerY - previous.centerY), 0.05)
+            previous = keyframe
+        }
     }
 }
 

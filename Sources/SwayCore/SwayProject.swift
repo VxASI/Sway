@@ -6,6 +6,8 @@ public struct SwayProject: Codable, Equatable, Sendable {
     public static let currentVersion = 1
 
     public var version: Int
+    /// User-editable display name. `nil` falls back to the bundle's file name.
+    public var name: String?
     /// Wall-clock creation date. Informational only - never used for
     /// synchronization.
     public var createdAt: Date
@@ -21,6 +23,7 @@ public struct SwayProject: Codable, Equatable, Sendable {
 
     public init(
         version: Int = SwayProject.currentVersion,
+        name: String? = nil,
         createdAt: Date = Date(),
         duration: TimeInterval,
         geometry: CaptureGeometry,
@@ -32,6 +35,7 @@ public struct SwayProject: Codable, Equatable, Sendable {
         startHostSeconds: Double
     ) {
         self.version = version
+        self.name = name
         self.createdAt = createdAt
         self.duration = duration
         self.geometry = geometry
@@ -113,6 +117,13 @@ public struct SwayProjectBundle {
 
     public func readEdit() throws -> SwayEdit {
         try JSONDecoder().decode(SwayEdit.self, from: Data(contentsOf: editURL))
+    }
+
+    public func write(project: SwayProject) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(project).write(to: projectURL, options: .atomic)
     }
 
     public func write(camera: CameraPath) throws {

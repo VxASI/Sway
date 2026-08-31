@@ -8,6 +8,7 @@ struct EditorView: View {
     var body: some View {
         if let editor = model.editor {
             EditorContentView(editor: editor)
+                .id(ObjectIdentifier(editor))
         } else {
             WelcomeView()
         }
@@ -17,32 +18,89 @@ struct EditorView: View {
 private struct EditorContentView: View {
     @ObservedObject var editor: EditorModel
     @EnvironmentObject private var model: AppModel
+    @State private var timelineScale: CGFloat = 1
 
     var body: some View {
         VStack(spacing: 0) {
-            VideoPlayer(player: editor.player)
-                .disabled(true)
-                .aspectRatio(editor.project.geometry.aspectRatio, contentMode: .fit)
+            toolbar
+            Divider().overlay(Color.white.opacity(0.06))
+
+            preview
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black)
 
             transport
-            Divider()
-            FocusTimelineView(editor: editor)
-                .frame(height: 96)
+            SegmentTimelineView(editor: editor, scale: timelineScale)
+                .frame(height: 78)
                 .padding(.horizontal, 20)
-                .padding(.bottom, 12)
-            Divider()
-            controls
+            inspector
         }
-        .alert("Sway", isPresented: alertBinding) {
+        .background(Color(red: 0.09, green: 0.09, blue: 0.11))
+        .alert("Sway", isPresented: errorBinding) {
             Button("OK", role: .cancel) { editor.errorMessage = nil }
         } message: {
-            Text(editor.errorMessage
-                ?? editor.exportedURL.map { "Exported to \($0.path)" }
-                ?? "")
+            Text(editor.errorMessage ?? "")
+        }
+        .sheet(isPresented: $editor.isExportSheetPresented) {
+            ExportSheet(editor: editor)
         }
     }
+
+    // MARK: - Toolbar
+
+    private var toolbar: some View {
+        HStack(spacing: 14) {
+            Button {
+                editor.save()
+                model.showLibrary()
+            } label: {
+                Label("Library", systemImage: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+
+            TextField("Project name", text: $editor.projectName)
+                .textFieldStyle(.plain)
+                .font(.headline)
+                .frame(maxWidth: 280)
+                .onSubmit { editor.commitProjectName() }
+
+            Spacer()
+
+            Button {
+                model.showPicker()
+            } label: {
+                Label("Record", systemImage: "record.circle")
+            }
+
+            Button {
+                editor.isExportSheetPresented = true
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .keyboardShortcut("e")
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Preview
+
+    /// The player with, when a zoom segment is selected, a draggable reticle
+    /// that sets the segment's focal point on the recording itself.
+    private var preview: some View {
+        VideoPlayer(player: editor.player)
+            .disabled(true)
+            .aspectRatio(editor.project.geometry.aspectRatio, contentMode: .fit)
+            .overlay {
+                if let segment = editor.selectedSegment, segment.kind == .zoom, !editor.isPlaying {
+                    FocalPointOverlay(editor: editor, segment: segment)
+                }
+            }
+            .padding(16)
+    }
+
+    // MARK: - Transport
 
     private var transport: some View {
         HStack(spacing: 14) {
@@ -60,56 +118,127 @@ private struct EditorContentView: View {
             Text("/ \(EditorContentView.timecode(editor.trimEnd))")
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
+
             Spacer()
+
+            Button {
+                editor.addSegment(kind: .zoom)
+            } label: {
+                Label("Zoom", systemImage: "plus.magnifyingglass")
+            }
+            .help("Add a zoom segment at the playhead")
+
+            Button {
+                editor.addSegment(kind: .followCursor)
+            } label: {
+                Label("Follow Cursor", systemImage: "cursorarrow.motionlines")
+            }
+            .help("Add a follow-cursor segment at the playhead")
+
+            HStack(spacing: 6) {
+                Image(systemName: "minus.magnifyingglass")
+                    .foregroundStyle(.secondary)
+                Slider(value: $timelineScale, in: 1...8)
+                    .frame(width: 110)
+                Image(systemName: "plus.magnifyingglass")
+                    .foregroundStyle(.secondary)
+            }
+            .help("Timeline zoom")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Inspector
+
+    @ViewBuilder
+    private var inspector: some View {
+        HStack(spacing: 16) {
+            if let segment = editor.selectedSegment {
+                Label(
+                    segment.kind == .zoom ? "Zoom" : "Follow Cursor",
+                    systemImage: segment.kind == .zoom
+                        ? "plus.magnifyingglass"
+                        : "cursorarrow.motionlines"
+                )
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(segment.kind == .zoom ? Color.purple : Color.blue)
+
+                slider(
+                    "Intensity",
+                    value: segment.zoom,
+                    in: 1.2...4,
+                    format: { String(format: "%.1f×", $0) }
+                ) { value in
+                    var updated = segment
+                    updated.zoom = value
+                    editor.updateSegment(updated)
+                }
+
+                if segment.kind == .followCursor {
+                    slider(
+                        "Smoothing",
+                        value: segment.smoothing,
+                        in: 0...1,
+                        format: { String(format: "%.0f%%", $0 * 100) }
+                    ) { value in
+                        var updated = segment
+                        updated.smoothing = value
+                        editor.updateSegment(updated)
+                    }
+                } else {
+                    Text("Drag the ring on the preview to aim the zoom.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button(role: .destructive) {
+                    editor.removeSegment(id: segment.id)
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+            } else {
+                Text("Select a segment on the timeline, or add a Zoom or Follow Cursor effect.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
+        .frame(height: 48)
+        .background(Color.white.opacity(0.03))
     }
 
-    private var controls: some View {
-        HStack(spacing: 16) {
-            if let focus = editor.focus {
-                Button("Remove Focus") { editor.removeFocus() }
-                HStack(spacing: 8) {
-                    Text("Zoom")
-                    Slider(
-                        value: Binding(
-                            get: { focus.zoom },
-                            set: { editor.setZoom($0) }
-                        ),
-                        in: 1.2...4,
-                        onEditingChanged: { if !$0 { editor.save() } }
-                    )
-                    .frame(width: 180)
-                    Text(String(format: "%.1f×", focus.zoom))
-                        .font(.system(.body, design: .monospaced))
-                        .frame(width: 46, alignment: .leading)
-                }
-            } else {
-                Button("Add Focus Range") { editor.addFocus() }
-            }
-
-            Spacer()
-
-            Button("New Recording") { model.showPicker() }
-            if editor.isExporting {
-                ProgressView()
-                    .controlSize(.small)
-            }
-            Button("Export…") { editor.export() }
-                .keyboardShortcut("e")
-                .disabled(editor.isExporting)
+    private func slider(
+        _ label: String,
+        value: Double,
+        in range: ClosedRange<Double>,
+        format: @escaping (Double) -> String,
+        onChange: @escaping (Double) -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Slider(
+                value: Binding(get: { value }, set: onChange),
+                in: range,
+                onEditingChanged: { if !$0 { editor.save() } }
+            )
+            .frame(width: 140)
+            Text(format(value))
+                .font(.system(.callout, design: .monospaced))
+                .frame(width: 46, alignment: .leading)
         }
-        .padding(20)
     }
 
-    private var alertBinding: Binding<Bool> {
+    private var errorBinding: Binding<Bool> {
         Binding(
-            get: { editor.errorMessage != nil || editor.exportedURL != nil },
-            set: { _ in
-                editor.errorMessage = nil
-                editor.exportedURL = nil
-            }
+            get: { editor.errorMessage != nil },
+            set: { if !$0 { editor.errorMessage = nil } }
         )
     }
 
@@ -119,5 +248,135 @@ private struct EditorContentView: View {
                       Int(total) / 60,
                       Int(total) % 60,
                       Int((total - total.rounded(.down)) * 100))
+    }
+}
+
+/// A draggable ring over the preview that positions a zoom segment's focal
+/// point. Coordinates map 1:1 onto the aspect-fitted video, which is exactly
+/// the view this overlay sits on.
+private struct FocalPointOverlay: View {
+    @ObservedObject var editor: EditorModel
+    let segment: EffectSegment
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            ZStack {
+                Circle()
+                    .strokeBorder(Color.purple, lineWidth: 2)
+                    .background(Circle().fill(Color.purple.opacity(0.15)))
+                    .frame(width: 44, height: 44)
+                Circle()
+                    .fill(Color.purple)
+                    .frame(width: 6, height: 6)
+            }
+            .position(
+                x: segment.centerX * size.width,
+                y: segment.centerY * size.height
+            )
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        var updated = segment
+                        updated.centerX = min(max(0, value.location.x / max(size.width, 1)), 1)
+                        updated.centerY = min(max(0, value.location.y / max(size.height, 1)), 1)
+                        editor.updateSegment(updated)
+                    }
+                    .onEnded { _ in editor.save() }
+            )
+        }
+    }
+}
+
+/// Export options, progress and result, in one sheet so the user always knows
+/// what state the export is in.
+private struct ExportSheet: View {
+    @ObservedObject var editor: EditorModel
+    @State private var settings = ExportSettings()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Export")
+                .font(.title2.weight(.semibold))
+
+            if let exported = editor.exportedURL {
+                success(exported)
+            } else if editor.isExporting {
+                exporting
+            } else {
+                form
+            }
+        }
+        .padding(24)
+        .frame(width: 380)
+        .onDisappear { editor.exportedURL = nil }
+    }
+
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("Dimensions", selection: $settings.sizePreset) {
+                ForEach(ExportSettings.SizePreset.allCases) { preset in
+                    Text(preset.label).tag(preset)
+                }
+            }
+            Picker("Quality", selection: $settings.quality) {
+                ForEach(ExportSettings.Quality.allCases) { quality in
+                    Text(quality.label).tag(quality)
+                }
+            }
+            .pickerStyle(.segmented)
+            Picker("Frame rate", selection: $settings.frameRate) {
+                ForEach(ExportSettings.FrameRate.allCases) { rate in
+                    Text(rate.label).tag(rate)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text("MP4 · zooms, cursor and trim are baked in exactly as previewed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button("Cancel") { editor.isExportSheetPresented = false }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Export…") { editor.export(settings: settings) }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+
+    private var exporting: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ProgressView(value: editor.exportProgress)
+            Text("Rendering… \(Int(editor.exportProgress * 100))%")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func success(_ url: URL) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Exported", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.headline)
+            Text(url.lastPathComponent)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack {
+                Button("Reveal in Finder") { editor.revealExportedFile() }
+                Spacer()
+                Button("Done") {
+                    editor.exportedURL = nil
+                    editor.isExportSheetPresented = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+        }
     }
 }

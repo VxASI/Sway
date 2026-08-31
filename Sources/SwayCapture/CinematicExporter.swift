@@ -1,5 +1,5 @@
 #if os(macOS)
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreGraphics
 import CoreImage
 import Foundation
@@ -20,17 +20,24 @@ public enum ExportError: Error, CustomStringConvertible {
 }
 
 public struct ExportOptions: Sendable {
-    /// Output size in pixels. `nil` keeps the recorded size.
+    /// Output size in pixels. `nil` keeps the recorded size. A different
+    /// aspect ratio than the capture is honored by aspect-filling: the camera
+    /// viewport is cropped, centered on the camera, never stretched.
     public var size: CGSize?
     public var drawsCursor: Bool
     /// Cursor size relative to the recorded scale (1 = macOS default size).
     public var cursorScale: Double
     public var drawsClickRings: Bool
     public var clickRingDuration: TimeInterval
-    /// Portion of the recording to export. `nil` exports all of it. A trimmed
-    /// export drops the audio track, since only the video is re-timed.
+    /// Portion of the recording to export. `nil` exports all of it. Audio is
+    /// kept and re-timed to the trimmed range.
     public var trim: ClosedRange<TimeInterval>?
     public var codec: AVVideoCodecType
+    /// Video bit rate. `nil` lets the codec pick a default.
+    public var averageBitRate: Int?
+    /// Caps the output frame rate by skipping source frames. `nil` keeps the
+    /// source timing.
+    public var frameRate: Int?
 
     public init(
         size: CGSize? = nil,
@@ -39,7 +46,9 @@ public struct ExportOptions: Sendable {
         drawsClickRings: Bool = true,
         clickRingDuration: TimeInterval = 0.45,
         trim: ClosedRange<TimeInterval>? = nil,
-        codec: AVVideoCodecType = .h264
+        codec: AVVideoCodecType = .h264,
+        averageBitRate: Int? = nil,
+        frameRate: Int? = nil
     ) {
         self.trim = trim
         self.size = size
@@ -48,6 +57,8 @@ public struct ExportOptions: Sendable {
         self.drawsClickRings = drawsClickRings
         self.clickRingDuration = clickRingDuration
         self.codec = codec
+        self.averageBitRate = averageBitRate
+        self.frameRate = frameRate
     }
 }
 
@@ -72,13 +83,20 @@ public final class CinematicExporter {
         self.overrideCamera = camera
     }
 
-    public func export(to outputURL: URL) async throws {
+    public func export(
+        to outputURL: URL,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
         let project = try bundle.readProject()
         let track = try bundle.readCursorTrack()
         let camera = overrideCamera
             ?? (try? bundle.readCameraPath())
             ?? CameraPathGenerator().generate(track: track, duration: project.duration)
         let trim = options.trim
+        let exportedDuration = max(
+            0.001,
+            (trim?.upperBound ?? project.duration) - (trim?.lowerBound ?? 0)
+        )
 
         let asset = AVURLAsset(url: bundle.videoURL)
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
@@ -89,6 +107,14 @@ public final class CinematicExporter {
         let outputSize = options.size ?? sourceSize
 
         let reader = try AVAssetReader(asset: asset)
+        if let trim {
+            // The reader trims both tracks at the source, so audio survives a
+            // trimmed export; the samples are re-timed to the new zero below.
+            reader.timeRange = CMTimeRange(
+                start: CMTime(seconds: trim.lowerBound, preferredTimescale: 600),
+                duration: CMTime(seconds: exportedDuration, preferredTimescale: 600)
+            )
+        }
         let videoOutput = AVAssetReaderTrackOutput(
             track: videoTrack,
             outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
@@ -100,8 +126,10 @@ public final class CinematicExporter {
         reader.add(videoOutput)
 
         var audioOutput: AVAssetReaderTrackOutput?
-        if let audioTrack, trim == nil {
-            let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
+        if let audioTrack {
+            let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM
+            ])
             if reader.canAdd(output) {
                 reader.add(output)
                 audioOutput = output
@@ -110,14 +138,15 @@ public final class CinematicExporter {
 
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
-        let videoInput = AVAssetWriterInput(
-            mediaType: .video,
-            outputSettings: [
-                AVVideoCodecKey: options.codec,
-                AVVideoWidthKey: Int(outputSize.width),
-                AVVideoHeightKey: Int(outputSize.height)
-            ]
-        )
+        var videoSettings: [String: Any] = [
+            AVVideoCodecKey: options.codec,
+            AVVideoWidthKey: Int(outputSize.width),
+            AVVideoHeightKey: Int(outputSize.height)
+        ]
+        if let bitRate = options.averageBitRate {
+            videoSettings[AVVideoCompressionPropertiesKey] = [AVVideoAverageBitRateKey: bitRate]
+        }
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = false
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: videoInput,
@@ -163,12 +192,15 @@ public final class CinematicExporter {
             track: track,
             scale: project.geometry.scale
         )
-        var firstPTS: CMTime?
+        let trimStart = trim?.lowerBound ?? 0
+        let frameStep = options.frameRate.map { 1.0 / Double($0) }
 
         let videoQueue = DispatchQueue(label: "ai.sway.export.video")
         var videoFinished = false
+        var nextFrameTime = trimStart
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             videoInput.requestMediaDataWhenReady(on: videoQueue) {
+                FileHandle.standardError.write(Data("[diag] video cb ready=\(videoInput.isReadyForMoreMediaData) writer=\(writer.status.rawValue) reader=\(reader.status.rawValue) err=\(String(describing: writer.error))\n".utf8))
                 while videoInput.isReadyForMoreMediaData {
                     guard !videoFinished else { return }
                     guard let sample = videoOutput.copyNextSampleBuffer(),
@@ -178,17 +210,20 @@ public final class CinematicExporter {
                         continuation.resume()
                         return
                     }
-                    let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                    if firstPTS == nil { firstPTS = pts }
-                    let relative = CMTimeGetSeconds(CMTimeSubtract(pts, firstPTS ?? .zero))
-                    if let trim {
-                        if relative < trim.lowerBound { continue }
-                        if relative > trim.upperBound {
-                            videoFinished = true
-                            videoInput.markAsFinished()
-                            continuation.resume()
-                            return
-                        }
+                    // The recorder starts the movie's timeline at the first
+                    // captured frame, so asset time is recording time - the
+                    // same timeline the cursor track and camera path use.
+                    let relative = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+                    if let trim, relative > trim.upperBound {
+                        videoFinished = true
+                        videoInput.markAsFinished()
+                        continuation.resume()
+                        return
+                    }
+                    // Frame-rate cap: drop source frames until the next slot.
+                    if let frameStep {
+                        guard relative >= nextFrameTime - frameStep / 2 else { continue }
+                        nextFrameTime += frameStep
                     }
                     let state = camera.state(at: relative)
                         ?? CameraKeyframe(time: relative, centerX: 0.5, centerY: 0.5, zoom: 1)
@@ -202,10 +237,11 @@ public final class CinematicExporter {
                         pool: adaptor.pixelBufferPool
                     ) else { continue }
                     let outputTime = CMTime(
-                        seconds: relative - (trim?.lowerBound ?? 0),
+                        seconds: max(0, relative - trimStart),
                         preferredTimescale: 600
                     )
                     adaptor.append(rendered, withPresentationTime: outputTime)
+                    progress?(min(0.98, max(0, (relative - trimStart) / exportedDuration)))
                 }
             }
         }
@@ -213,6 +249,7 @@ public final class CinematicExporter {
         if let audioInput, let audioOutput {
             let audioQueue = DispatchQueue(label: "ai.sway.export.audio")
             var audioFinished = false
+            let offset = CMTime(seconds: -trimStart, preferredTimescale: 600)
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 audioInput.requestMediaDataWhenReady(on: audioQueue) {
                     while audioInput.isReadyForMoreMediaData {
@@ -223,7 +260,11 @@ public final class CinematicExporter {
                             continuation.resume()
                             return
                         }
-                        audioInput.append(sample)
+                        // Align audio with the trimmed video's new zero.
+                        let shifted = trimStart > 0
+                            ? CinematicExporter.retimed(sample, by: offset) ?? sample
+                            : sample
+                        audioInput.append(shifted)
                     }
                 }
             }
@@ -233,6 +274,36 @@ public final class CinematicExporter {
         if writer.status == .failed, let error = writer.error {
             throw error
         }
+        progress?(1)
+    }
+
+    /// A copy of `sample` with its presentation timestamp shifted by `offset`.
+    private static func retimed(_ sample: CMSampleBuffer, by offset: CMTime) -> CMSampleBuffer? {
+        var count = 0
+        CMSampleBufferGetSampleTimingInfoArray(
+            sample, entryCount: 0, arrayToFill: nil, entriesNeededOut: &count
+        )
+        var timing = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: count)
+        CMSampleBufferGetSampleTimingInfoArray(
+            sample, entryCount: count, arrayToFill: &timing, entriesNeededOut: &count
+        )
+        for index in timing.indices {
+            timing[index].presentationTimeStamp = CMTimeAdd(
+                timing[index].presentationTimeStamp, offset
+            )
+            if timing[index].decodeTimeStamp.isValid {
+                timing[index].decodeTimeStamp = CMTimeAdd(timing[index].decodeTimeStamp, offset)
+            }
+        }
+        var shifted: CMSampleBuffer?
+        CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sample,
+            sampleTimingEntryCount: count,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &shifted
+        )
+        return shifted
     }
 
     private func renderFrame(

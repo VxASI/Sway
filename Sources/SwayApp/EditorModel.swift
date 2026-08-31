@@ -7,19 +7,71 @@ import SwayCapture
 import SwayCore
 import SwiftUI
 
+/// Everything the export sheet lets the user choose. Translated into
+/// `ExportOptions` when the export starts.
+struct ExportSettings {
+    enum SizePreset: String, CaseIterable, Identifiable {
+        case original, landscape, vertical, square
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .original: return "Original"
+            case .landscape: return "1920×1080"
+            case .vertical: return "1080×1920"
+            case .square: return "1080×1080"
+            }
+        }
+
+        var size: CGSize? {
+            switch self {
+            case .original: return nil
+            case .landscape: return CGSize(width: 1920, height: 1080)
+            case .vertical: return CGSize(width: 1080, height: 1920)
+            case .square: return CGSize(width: 1080, height: 1080)
+            }
+        }
+    }
+
+    enum Quality: String, CaseIterable, Identifiable {
+        case standard, high
+        var id: String { rawValue }
+        var label: String { self == .high ? "High" : "Standard" }
+        /// Bits per pixel per frame, the usual H.264 sizing rule of thumb.
+        var bitsPerPixel: Double { self == .high ? 0.15 : 0.07 }
+    }
+
+    enum FrameRate: String, CaseIterable, Identifiable {
+        case original, fps30
+        var id: String { rawValue }
+        var label: String { self == .original ? "Original" : "30 fps" }
+        var value: Int? { self == .original ? nil : 30 }
+    }
+
+    var sizePreset: SizePreset = .original
+    var quality: Quality = .high
+    var frameRate: FrameRate = .original
+}
+
 /// The editor's state: the recording, the edit being made on it, and the
 /// preview player that renders that edit live.
 @MainActor
 final class EditorModel: ObservableObject {
     let bundle: SwayProjectBundle
-    let project: SwayProject
+    private(set) var project: SwayProject
     let track: CursorTrack
     let player: AVPlayer
 
     @Published private(set) var edit: SwayEdit
     @Published var playhead: TimeInterval = 0
     @Published private(set) var isPlaying = false
+    @Published var selectedSegmentID: UUID?
+    @Published var projectName: String
+
+    // Export flow.
+    @Published var isExportSheetPresented = false
     @Published private(set) var isExporting = false
+    @Published private(set) var exportProgress: Double = 0
     @Published var exportedURL: URL?
     @Published var errorMessage: String?
 
@@ -28,15 +80,21 @@ final class EditorModel: ObservableObject {
     private var timeObserver: Any?
 
     var duration: TimeInterval { project.duration }
-    var focus: FocusRange? { edit.focus }
+    var segments: [EffectSegment] { edit.segments }
     var trimStart: TimeInterval { edit.trimStart }
     var trimEnd: TimeInterval { edit.trimEnd }
+
+    var selectedSegment: EffectSegment? {
+        edit.segments.first { $0.id == selectedSegmentID }
+    }
 
     init(result: RecordingResult) {
         bundle = result.bundle
         project = result.project
         track = result.track
         edit = result.edit
+        projectName = result.project.name
+            ?? result.bundle.url.deletingPathExtension().lastPathComponent
 
         let asset = AVURLAsset(url: result.bundle.videoURL)
         let item = AVPlayerItem(asset: asset)
@@ -46,7 +104,7 @@ final class EditorModel: ObservableObject {
         camera.path = generator.generate(
             track: result.track,
             duration: result.project.duration,
-            focus: result.edit.focus
+            segments: result.edit.segments
         )
         let cursor = CursorRenderer(
             options: ExportOptions(),
@@ -118,28 +176,78 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    // MARK: - Editing
+    // MARK: - Segments
 
-    func setFocus(_ range: FocusRange?) {
-        edit.focus = range?.clamped(to: duration)
+    /// Adds a segment of `kind` in the first free stretch of timeline at or
+    /// after the playhead. A zoom segment starts focused on the cursor's
+    /// position at that moment, which is almost always what was meant.
+    func addSegment(kind: EffectKind) {
+        let length = max(1.0, min(4, duration * 0.3))
+        let minimum = 0.25
+        guard let gap = firstFreeGap(from: playhead, minimum: minimum) else {
+            errorMessage = "There is no room left on the timeline for another effect."
+            return
+        }
+        let start = gap.lowerBound
+        let end = min(gap.upperBound, start + length)
+        var segment = EffectSegment(kind: kind, start: start, end: end)
+        if kind == .zoom, let position = track.position(at: start) {
+            segment.centerX = position.x
+            segment.centerY = position.y
+        }
+        edit.segments = EffectSegment.resolved(edit.segments + [segment], duration: duration)
+        selectedSegmentID = segment.id
+        regenerateCamera()
+        save()
+    }
+
+    /// Replaces the segment with the same ID. `movingEnd` picks which edge
+    /// gives way when the segment is squeezed against its minimum length.
+    func updateSegment(_ segment: EffectSegment, movingEnd: Bool = true) {
+        guard let index = edit.segments.firstIndex(where: { $0.id == segment.id }) else { return }
+        var updated = segment.clamped(to: duration, movingEnd: movingEnd)
+        // Respect the neighbors: a segment cannot be dragged over another.
+        if index > 0 {
+            updated.start = max(updated.start, edit.segments[index - 1].end)
+        }
+        if index < edit.segments.count - 1 {
+            updated.end = min(updated.end, edit.segments[index + 1].start)
+        }
+        guard updated.duration >= 0.25 - 1e-9 else { return }
+        edit.segments[index] = updated
+        edit.segments.sort { $0.start < $1.start }
         regenerateCamera()
     }
 
-    func addFocus() {
-        let length = max(1.5, min(4, duration * 0.4))
-        let start = min(max(playhead, edit.trimStart), max(edit.trimStart, edit.trimEnd - length))
-        setFocus(FocusRange(start: start, end: min(edit.trimEnd, start + length), zoom: 2))
+    func removeSegment(id: UUID) {
+        edit.segments.removeAll { $0.id == id }
+        if selectedSegmentID == id { selectedSegmentID = nil }
+        regenerateCamera()
+        save()
     }
 
-    func removeFocus() {
-        setFocus(nil)
+    private func firstFreeGap(
+        from time: TimeInterval,
+        minimum: TimeInterval
+    ) -> ClosedRange<TimeInterval>? {
+        let lower = max(edit.trimStart, 0)
+        let upper = min(edit.trimEnd, duration)
+        var edges: [(start: TimeInterval, end: TimeInterval)] = [(lower, lower)]
+        edges += edit.segments.map { ($0.start, $0.end) }
+        edges.append((upper, upper))
+
+        for index in 0..<(edges.count - 1) {
+            let gapStart = max(edges[index].end, lower)
+            let gapEnd = min(edges[index + 1].start, upper)
+            let start = max(gapStart, min(time, gapEnd - minimum))
+            if gapEnd - start >= minimum {
+                return start...gapEnd
+            }
+        }
+        return nil
     }
 
-    func setZoom(_ zoom: Double) {
-        guard var range = edit.focus else { return }
-        range.zoom = zoom
-        setFocus(range)
-    }
+    // MARK: - Trim
 
     func setTrimStart(_ time: TimeInterval) {
         edit.trimStart = min(max(0, time), max(0, edit.trimEnd - 0.25))
@@ -151,10 +259,27 @@ final class EditorModel: ObservableObject {
         if playhead > edit.trimEnd { seek(to: edit.trimEnd) }
     }
 
+    // MARK: - Project name
+
+    func commitProjectName() {
+        let trimmed = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            projectName = project.name
+                ?? bundle.url.deletingPathExtension().lastPathComponent
+            return
+        }
+        project.name = trimmed
+        do {
+            try bundle.write(project: project)
+        } catch {
+            errorMessage = "Could not rename the project.\n\n\(error)"
+        }
+    }
+
     /// Rebuilds the camera path and refreshes the paused frame so the preview
     /// always shows the edit as it stands.
     private func regenerateCamera() {
-        camera.path = generator.generate(track: track, duration: duration, focus: edit.focus)
+        camera.path = generator.generate(track: track, duration: duration, segments: edit.segments)
         if !isPlaying {
             seek(to: playhead)
         }
@@ -171,26 +296,46 @@ final class EditorModel: ObservableObject {
 
     // MARK: - Export
 
-    func export() {
+    func export(settings: ExportSettings) {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = bundle.url.deletingPathExtension().lastPathComponent + ".mp4"
+        panel.nameFieldStringValue = projectName + ".mp4"
         panel.allowedContentTypes = [.mpeg4Movie]
         guard panel.runModal() == .OK, let destination = panel.url else { return }
 
         save()
         pause()
         isExporting = true
-        let options = ExportOptions(trim: edit.trimStart...edit.trimEnd)
+        exportProgress = 0
+
+        let outputSize = settings.sizePreset.size ?? CGSize(
+            width: project.geometry.pixelWidth,
+            height: project.geometry.pixelHeight
+        )
+        let fps = Double(settings.frameRate.value ?? 60)
+        let bitRate = Int(outputSize.width * outputSize.height * fps * settings.quality.bitsPerPixel)
+        let options = ExportOptions(
+            size: settings.sizePreset.size,
+            trim: edit.trimStart...edit.trimEnd,
+            averageBitRate: bitRate,
+            frameRate: settings.frameRate.value
+        )
         let exporter = CinematicExporter(bundle: bundle, options: options, camera: camera.path)
         Task {
             do {
-                try await exporter.export(to: destination)
+                try await exporter.export(to: destination) { fraction in
+                    Task { @MainActor [weak self] in self?.exportProgress = fraction }
+                }
                 self.exportedURL = destination
             } catch {
                 self.errorMessage = "Export failed.\n\n\(error)"
             }
             self.isExporting = false
         }
+    }
+
+    func revealExportedFile() {
+        guard let exportedURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([exportedURL])
     }
 
     // MARK: - Preview composition

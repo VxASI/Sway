@@ -103,7 +103,7 @@ public final class RecordingSession {
             .filter { $0.time >= 0 && (duration <= 0 || $0.time <= duration) }
 
         let edit = SwayEdit.initial(duration: duration, track: track)
-        let camera = cameraGenerator.generate(track: track, duration: duration, focus: edit.focus)
+        let camera = cameraGenerator.generate(track: track, duration: duration, segments: edit.segments)
         let geometry = recorder.geometry ?? CaptureGeometry(
             displayID: 0, x: 0, y: 0, width: 0, height: 0, pixelWidth: 0, pixelHeight: 0
         )

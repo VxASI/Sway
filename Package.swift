@@ -25,4 +25,7 @@ package.products.append(.executable(name: "SwayApp", targets: ["SwayApp"]))
 package.targets.append(
     .executableTarget(name: "SwayApp", dependencies: ["SwayCore", "SwayCapture"])
 )
+package.targets.append(
+    .testTarget(name: "SwayCaptureTests", dependencies: ["SwayCore", "SwayCapture"])
+)
 #endif

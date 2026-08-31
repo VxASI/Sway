@@ -54,21 +54,52 @@ public struct FocusRange: Codable, Equatable, Sendable {
 public struct SwayEdit: Codable, Equatable, Sendable {
     public var trimStart: TimeInterval
     public var trimEnd: TimeInterval
-    /// The single focus range supported by the first editor. `nil` means the
-    /// whole recording plays at 1x.
-    public var focus: FocusRange?
+    /// User-authored effect segments, sorted and non-overlapping. Empty means
+    /// the whole recording plays at 1x.
+    public var segments: [EffectSegment]
 
-    public init(trimStart: TimeInterval = 0, trimEnd: TimeInterval, focus: FocusRange? = nil) {
+    public init(trimStart: TimeInterval = 0, trimEnd: TimeInterval, segments: [EffectSegment] = []) {
         self.trimStart = trimStart
         self.trimEnd = trimEnd
-        self.focus = focus
+        self.segments = segments
     }
 
     public var trimmedDuration: TimeInterval { max(0, trimEnd - trimStart) }
 
-    /// The edit a freshly recorded bundle opens with: no trim, and a focus
-    /// range proposed from the detected interactions so the user has something
-    /// to drag instead of a blank timeline.
+    /// The single focus range of the first editor, kept so old `edit.json`
+    /// files decode into an equivalent follow-cursor segment.
+    private enum CodingKeys: String, CodingKey {
+        case trimStart, trimEnd, segments, focus
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        trimStart = try container.decodeIfPresent(TimeInterval.self, forKey: .trimStart) ?? 0
+        trimEnd = try container.decode(TimeInterval.self, forKey: .trimEnd)
+        if let segments = try container.decodeIfPresent([EffectSegment].self, forKey: .segments) {
+            self.segments = segments
+        } else if let focus = try container.decodeIfPresent(FocusRange.self, forKey: .focus) {
+            segments = [EffectSegment(
+                kind: .followCursor,
+                start: focus.start,
+                end: focus.end,
+                zoom: focus.zoom
+            )]
+        } else {
+            segments = []
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(trimStart, forKey: .trimStart)
+        try container.encode(trimEnd, forKey: .trimEnd)
+        try container.encode(segments, forKey: .segments)
+    }
+
+    /// The edit a freshly recorded bundle opens with: no trim, and a
+    /// follow-cursor segment proposed from the detected interactions so the
+    /// user has something to drag instead of a blank timeline.
     public static func initial(
         duration: TimeInterval,
         track: CursorTrack,
@@ -78,14 +109,15 @@ public struct SwayEdit: Codable, Equatable, Sendable {
         guard duration > 0 else { return edit }
         let suggestion = detector.segments(for: track, duration: duration)
             .max(by: { $0.interactionCount < $1.interactionCount })
+        let proposed: EffectSegment
         if let suggestion {
-            edit.focus = FocusRange(start: suggestion.start, end: suggestion.end)
-                .clamped(to: duration)
+            proposed = EffectSegment(kind: .followCursor, start: suggestion.start, end: suggestion.end)
         } else {
             let start = duration * 0.25
             let end = min(duration, start + max(1.5, duration * 0.5))
-            edit.focus = FocusRange(start: start, end: end).clamped(to: duration)
+            proposed = EffectSegment(kind: .followCursor, start: start, end: end)
         }
+        edit.segments = EffectSegment.resolved([proposed], duration: duration)
         return edit
     }
 }

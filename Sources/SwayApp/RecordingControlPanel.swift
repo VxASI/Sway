@@ -82,6 +82,78 @@ private struct RecordingControlView: View {
     }
 }
 
+/// The floating 3-2-1 shown between Start Recording and the capture actually
+/// beginning. Non-activating, so whatever the user is about to demo keeps
+/// focus, and cancellable in case they clicked too soon.
+@MainActor
+final class CountdownPanel {
+    private let state = CountdownState()
+    private let panel: NSPanel
+
+    init(onCancel: @escaping () -> Void) {
+        let hosting = NSHostingView(rootView: CountdownView(state: state, onCancel: onCancel))
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 160, height: 160),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = hosting
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.hidesOnDeactivate = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+    }
+
+    func show(count: Int) {
+        state.count = count
+        if let screen = NSScreen.main {
+            let frame = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(
+                x: frame.midX - panel.frame.width / 2,
+                y: frame.midY - panel.frame.height / 2
+            ))
+        }
+        panel.orderFrontRegardless()
+    }
+
+    func update(count: Int) {
+        state.count = count
+    }
+
+    func close() {
+        panel.orderOut(nil)
+    }
+}
+
+@MainActor
+private final class CountdownState: ObservableObject {
+    @Published var count = 3
+}
+
+private struct CountdownView: View {
+    @ObservedObject var state: CountdownState
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Text("\(state.count)")
+                .font(.system(size: 72, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .animation(.easeOut(duration: 0.2), value: state.count)
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.borderless)
+                .font(.callout)
+        }
+        .frame(width: 160, height: 160)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
+    }
+}
+
 /// ⇧⌘S anywhere on the system stops the recording, so the user never has to go
 /// looking for Sway's window.
 @MainActor

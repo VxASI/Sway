@@ -104,6 +104,9 @@ struct CameraShot {
     var anchorY: Double?
     /// How much the anchor pulls the frame against the live cursor position.
     var anchorWeight: Double
+    /// Multiplier on the center spring stiffness while this shot is active,
+    /// so a segment can be smoother or snappier than the default follow.
+    var stiffnessScale: Double
 
     init(
         start: TimeInterval,
@@ -111,7 +114,8 @@ struct CameraShot {
         zoom: Double,
         anchorX: Double? = nil,
         anchorY: Double? = nil,
-        anchorWeight: Double
+        anchorWeight: Double,
+        stiffnessScale: Double = 1
     ) {
         self.start = start
         self.end = end
@@ -119,6 +123,7 @@ struct CameraShot {
         self.anchorX = anchorX
         self.anchorY = anchorY
         self.anchorWeight = anchorWeight
+        self.stiffnessScale = stiffnessScale
     }
 
     func contains(_ time: TimeInterval) -> Bool {
@@ -177,6 +182,44 @@ public struct CameraPathGenerator: Sendable {
         return generate(track: track, duration: duration, shots: shots)
     }
 
+    /// Camera path for the editor's effect segments: full frame outside them,
+    /// and inside each segment either a fixed zoom onto its focal point or a
+    /// cursor follow with its own smoothing. Segments must be sorted and
+    /// non-overlapping (`EffectSegment.resolved` guarantees this).
+    public func generate(
+        track: CursorTrack,
+        duration: TimeInterval,
+        segments: [EffectSegment]
+    ) -> CameraPath {
+        let shots = segments.map { segment -> CameraShot in
+            switch segment.kind {
+            case .zoom:
+                // Fully anchored: the frame composes around the chosen focal
+                // point and ignores the live cursor.
+                return CameraShot(
+                    start: segment.start,
+                    end: segment.end,
+                    zoom: max(1, segment.zoom),
+                    anchorX: segment.centerX,
+                    anchorY: segment.centerY,
+                    anchorWeight: 1
+                )
+            case .followCursor:
+                // smoothing 0...1 maps to a stiffer or softer center spring:
+                // 0 doubles the default stiffness, 1 halves it.
+                let scale = pow(2, (0.5 - segment.smoothing) * 2)
+                return CameraShot(
+                    start: segment.start,
+                    end: segment.end,
+                    zoom: max(1, segment.zoom),
+                    anchorWeight: 0,
+                    stiffnessScale: scale
+                )
+            }
+        }
+        return generate(track: track, duration: duration, shots: shots)
+    }
+
     private func generate(
         track: CursorTrack,
         duration: TimeInterval,
@@ -218,6 +261,12 @@ public struct CameraPathGenerator: Sendable {
                 ? segments[segmentIndex]
                 : nil
 
+            // Per-shot smoothing scales the center springs; the zoom spring
+            // keeps its own timing so ease in/out stays consistent.
+            let stiffness = config.centerStiffness * (segment?.stiffnessScale ?? 1)
+            centerX.stiffness = stiffness
+            centerY.stiffness = stiffness
+
             let targetZoom = segment?.zoom ?? config.restZoom
             zoom.advance(to: targetZoom, dt: dt)
             let currentZoom = max(1, zoom.value)
@@ -233,9 +282,11 @@ public struct CameraPathGenerator: Sendable {
                 let desiredX = (segment.anchorX ?? sample.x) * weight + (sample.x + leadX) * (1 - weight)
                 let desiredY = (segment.anchorY ?? sample.y) * weight + (sample.y + leadY) * (1 - weight)
                 // Dead zone: ignore movement that keeps the cursor comfortably
-                // inside the current viewport.
+                // inside the current viewport. A fully anchored shot composes
+                // exactly on its focal point, so the dead zone shrinks with
+                // the anchor weight.
                 let halfViewport = 0.5 / currentZoom
-                let deadZone = config.deadZone * halfViewport * 2
+                let deadZone = config.deadZone * halfViewport * 2 * (1 - weight)
                 if abs(desiredX - targetX) > deadZone {
                     targetX += desiredX - targetX - copysign(deadZone, desiredX - targetX)
                 }

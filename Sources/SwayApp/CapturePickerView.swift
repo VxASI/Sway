@@ -63,12 +63,30 @@ struct CapturePickerView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 18) {
             Button("Cancel") { model.cancelPicking() }
                 .keyboardShortcut(.cancelAction)
+
             Spacer()
+
+            Picker("Frame rate", selection: $model.recordingFrameRate) {
+                Text("30 fps").tag(30)
+                Text("60 fps").tag(60)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 150)
+            .labelsHidden()
+            .help("Capture frame rate")
+
+            Toggle(isOn: $model.capturesSystemAudio) {
+                Label("System Audio", systemImage: "speaker.wave.2")
+            }
+            .toggleStyle(.checkbox)
+            .help("Record the Mac's audio output alongside the screen")
+
             Button("Start Recording") { model.startRecording() }
                 .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
                 .disabled(model.selectedSource == nil)
         }
         .padding(20)
