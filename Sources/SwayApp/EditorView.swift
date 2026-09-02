@@ -20,6 +20,7 @@ private struct EditorContentView: View {
     @ObservedObject var editor: EditorModel
     @EnvironmentObject private var model: AppModel
     @State private var timelineScale: CGFloat = 1
+    @State private var smartFocusZoom: Double = 1.8
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,6 +36,7 @@ private struct EditorContentView: View {
                 .frame(height: 78)
                 .padding(.horizontal, 20)
             inspector
+            canvasBar
         }
         .background(Color(red: 0.09, green: 0.09, blue: 0.11))
         .alert("Sway", isPresented: errorBinding) {
@@ -90,7 +92,7 @@ private struct EditorContentView: View {
     /// The player with, when a zoom segment is selected, a draggable reticle
     /// that sets the segment's focal point on the recording itself.
     private var preview: some View {
-        PlayerLayerView(player: editor.player)
+        PreviewView(editor: editor)
             .aspectRatio(editor.project.geometry.aspectRatio, contentMode: .fit)
             .overlay {
                 if let segment = editor.selectedSegment, segment.kind == .zoom, !editor.isPlaying {
@@ -120,6 +122,23 @@ private struct EditorContentView: View {
                 .foregroundStyle(.secondary)
 
             Spacer()
+
+            Menu {
+                ForEach(EditorModel.SmartFocusMode.allCases) { mode in
+                    Button(mode.label) { editor.applySmartFocus(mode: mode, zoom: smartFocusZoom) }
+                }
+                Divider()
+                Picker("Zoom strength", selection: $smartFocusZoom) {
+                    Text("Subtle 1.4×").tag(1.4)
+                    Text("Medium 1.8×").tag(1.8)
+                    Text("Strong 2.4×").tag(2.4)
+                }
+                Divider()
+                Button("Clear All Segments", role: .destructive) { editor.clearSegments() }
+            } label: {
+                Label("Smart Focus", systemImage: "wand.and.stars")
+            }
+            .help("Generate camera moves from the recorded clicks or cursor")
 
             Button {
                 editor.addSegment(kind: .zoom)
@@ -212,6 +231,69 @@ private struct EditorContentView: View {
         .background(Color.white.opacity(0.03))
     }
 
+    // MARK: - Canvas
+
+    /// The "clean" look: recording as a rounded card on a gradient canvas.
+    private var canvasBar: some View {
+        let style = editor.canvasStyle
+        return HStack(spacing: 16) {
+            Toggle(isOn: Binding(
+                get: { style.isEnabled },
+                set: { on in
+                    var updated = style
+                    updated.isEnabled = on
+                    editor.setCanvas(updated)
+                    editor.save()
+                }
+            )) {
+                Label("Canvas", systemImage: "rectangle.inset.filled")
+                    .font(.callout.weight(.semibold))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            if style.isEnabled {
+                Picker("", selection: Binding(
+                    get: { style.background },
+                    set: { background in
+                        var updated = style
+                        updated.background = background
+                        editor.setCanvas(updated)
+                        editor.save()
+                    }
+                )) {
+                    ForEach(CanvasStyle.Background.allCases) { Text($0.label).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 120)
+
+                slider("Padding", value: style.padding, in: 0...0.2,
+                       format: { String(format: "%.0f%%", $0 * 100) }) { value in
+                    var updated = style
+                    updated.padding = value
+                    editor.setCanvas(updated)
+                }
+                slider("Corners", value: style.cornerRadius, in: 0...0.1,
+                       format: { String(format: "%.0f%%", $0 * 100) }) { value in
+                    var updated = style
+                    updated.cornerRadius = value
+                    editor.setCanvas(updated)
+                }
+                slider("Shadow", value: style.shadow, in: 0...1,
+                       format: { String(format: "%.0f%%", $0 * 100) }) { value in
+                    var updated = style
+                    updated.shadow = value
+                    editor.setCanvas(updated)
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .frame(height: 44)
+        .background(Color.white.opacity(0.02))
+    }
+
     private func slider(
         _ label: String,
         value: Double,
@@ -251,44 +333,6 @@ private struct EditorContentView: View {
     }
 }
 
-/// The preview surface: a bare `AVPlayerLayer` in an `NSView`, no controls.
-///
-/// SwiftUI's `VideoPlayer` (the `_AVKit_SwiftUI` overlay) aborts at class
-/// metadata initialization when the app is built as a plain SwiftPM
-/// executable - "superclass not found" for its AVKit-backed view - which is
-/// exactly the crash on opening the editor. AVFoundation alone has no such
-/// dependency, and the editor never wanted the system controls anyway.
-private struct PlayerLayerView: NSViewRepresentable {
-    let player: AVPlayer
-
-    func makeNSView(context: Context) -> PlayerLayerHostView {
-        let view = PlayerLayerHostView()
-        view.playerLayer.player = player
-        return view
-    }
-
-    func updateNSView(_ view: PlayerLayerHostView, context: Context) {
-        if view.playerLayer.player !== player {
-            view.playerLayer.player = player
-        }
-    }
-}
-
-private final class PlayerLayerHostView: NSView {
-    let playerLayer = AVPlayerLayer()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        playerLayer.videoGravity = .resizeAspect
-        playerLayer.backgroundColor = NSColor.black.cgColor
-        layer = playerLayer
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("not used") }
-}
-
 /// A draggable ring over the preview that positions a zoom segment's focal
 /// point. Coordinates map 1:1 onto the aspect-fitted video, which is exactly
 /// the view this overlay sits on.
@@ -298,7 +342,16 @@ private struct FocalPointOverlay: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let size = geometry.size
+            // With the canvas on, the recording sits inset by the padding.
+            let style = editor.canvasStyle
+            let inset = style.isEnabled
+                ? min(geometry.size.width, geometry.size.height) * style.padding
+                : 0
+            let origin = CGPoint(x: inset, y: inset)
+            let size = CGSize(
+                width: geometry.size.width - inset * 2,
+                height: geometry.size.height - inset * 2
+            )
             ZStack {
                 Circle()
                     .strokeBorder(Color.purple, lineWidth: 2)
@@ -309,15 +362,15 @@ private struct FocalPointOverlay: View {
                     .frame(width: 6, height: 6)
             }
             .position(
-                x: segment.centerX * size.width,
-                y: segment.centerY * size.height
+                x: origin.x + segment.centerX * size.width,
+                y: origin.y + segment.centerY * size.height
             )
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         var updated = segment
-                        updated.centerX = min(max(0, value.location.x / max(size.width, 1)), 1)
-                        updated.centerY = min(max(0, value.location.y / max(size.height, 1)), 1)
+                        updated.centerX = min(max(0, (value.location.x - origin.x) / max(size.width, 1)), 1)
+                        updated.centerY = min(max(0, (value.location.y - origin.y) / max(size.height, 1)), 1)
                         editor.updateSegment(updated)
                     }
                     .onEnded { _ in editor.save() }

@@ -57,11 +57,19 @@ public struct SwayEdit: Codable, Equatable, Sendable {
     /// User-authored effect segments, sorted and non-overlapping. Empty means
     /// the whole recording plays at 1x.
     public var segments: [EffectSegment]
+    /// How the recording is framed: full-bleed, or floating on a canvas.
+    public var canvas: CanvasStyle
 
-    public init(trimStart: TimeInterval = 0, trimEnd: TimeInterval, segments: [EffectSegment] = []) {
+    public init(
+        trimStart: TimeInterval = 0,
+        trimEnd: TimeInterval,
+        segments: [EffectSegment] = [],
+        canvas: CanvasStyle = .off
+    ) {
         self.trimStart = trimStart
         self.trimEnd = trimEnd
         self.segments = segments
+        self.canvas = canvas
     }
 
     public var trimmedDuration: TimeInterval { max(0, trimEnd - trimStart) }
@@ -69,13 +77,14 @@ public struct SwayEdit: Codable, Equatable, Sendable {
     /// The single focus range of the first editor, kept so old `edit.json`
     /// files decode into an equivalent follow-cursor segment.
     private enum CodingKeys: String, CodingKey {
-        case trimStart, trimEnd, segments, focus
+        case trimStart, trimEnd, segments, focus, canvas
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         trimStart = try container.decodeIfPresent(TimeInterval.self, forKey: .trimStart) ?? 0
         trimEnd = try container.decode(TimeInterval.self, forKey: .trimEnd)
+        canvas = try container.decodeIfPresent(CanvasStyle.self, forKey: .canvas) ?? .off
         if let segments = try container.decodeIfPresent([EffectSegment].self, forKey: .segments) {
             self.segments = segments
         } else if let focus = try container.decodeIfPresent(FocusRange.self, forKey: .focus) {
@@ -95,6 +104,7 @@ public struct SwayEdit: Codable, Equatable, Sendable {
         try container.encode(trimStart, forKey: .trimStart)
         try container.encode(trimEnd, forKey: .trimEnd)
         try container.encode(segments, forKey: .segments)
+        try container.encode(canvas, forKey: .canvas)
     }
 
     /// The edit a freshly recorded bundle opens with: no trim, and a

@@ -14,8 +14,9 @@ func printUsage() {
 
     USAGE:
       sway record [options]      record until Return is pressed
-      sway export <bundle> <out.mp4> [--no-cursor] [--width <px>]
-                                 render with camera moves and drawn cursor
+      sway export <bundle> <out.mp4> [--no-cursor] [--width <px>] [--canvas]
+                                 render with camera moves and drawn cursor;
+                                 --canvas floats the recording on a gradient
       sway inspect <bundle>      summarize a .sway bundle
       sway recamera <bundle>     regenerate camera.json from cursor.json
 
@@ -96,6 +97,7 @@ case "export":
     let destination = URL(fileURLWithPath: arguments[2])
     var exportOptions = ExportOptions()
     if arguments.contains("--no-cursor") { exportOptions.drawsCursor = false }
+    if arguments.contains("--canvas") { exportOptions.canvas = .clean }
     if let width = value(for: "--width").flatMap(Double.init) {
         let aspect = (try? exportBundle.readProject())?.geometry.aspectRatio ?? (16.0 / 9)
         exportOptions.size = CGSize(width: width, height: (width / aspect).rounded())

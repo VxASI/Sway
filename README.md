@@ -74,8 +74,26 @@ cancellable countdown before capture begins. While recording, the main window
 hides and a floating capsule shows the elapsed time and Stop; Sway itself is
 excluded from display captures.
 
-The editor shows the preview with the camera applied live (the same renderer
-the exporter uses, so preview is export), a playhead, trim handles, a zoomable
+The editor preview is its own 60 Hz Metal view: `AVPlayer` only supplies
+frames and audio, and every tick renders the camera and cursor at their current
+positions (the same renderer the exporter uses, so preview is export). This
+matters because ScreenCaptureKit only records a frame when the screen changes,
+so a recording of a mostly static screen is ~10 fps; rendering only on source
+frames would make every camera move stutter. Export renders at a constant 60
+fps for the same reason.
+
+**Smart Focus** generates the camera moves from the recording: *Auto-focus on
+clicks* turns each group of clicks, drags and scrolls into a zoom shot anchored
+slightly above the interaction and held long enough to read; *Auto-focus on
+cursor* uses follow-cursor segments over the same stretches. Either result is
+just segments, so it can be tuned by hand afterwards.
+
+**Canvas** presents the recording as a rounded card with a soft shadow floating
+on a full-frame gradient (Spectrum, Aurora, Sunset, Ocean, Graphite), with
+padding, corner radius and shadow controls. It is part of the edit, rendered
+identically in preview and export, and the CLI has `--canvas`.
+
+The editor shows the preview, a playhead, trim handles, a zoomable
 timeline, and any number of effect segments drawn as colored bars that select,
 move and resize by dragging. A selected segment's intensity, smoothing and (for
 Zoom) focal point are edited inline; the project name is editable in the
@@ -187,5 +205,9 @@ segments baked in, progress, trimmed audio, aspect presets, frame-rate cap.
 - Auto-hiding the cursor while typing (needs keyboard events in the tap).
 - Region capture is passed to `SCStreamConfiguration.sourceRect`, which requires
   macOS 14; on macOS 13 the full display is captured.
-- Cursor highlights, click effects, backgrounds, captions, scene transitions.
-  The segment model (`EffectSegment.kind`) is where these slot in.
+- Webcam card and captions (the canvas leaves room for both; the webcam needs a
+  camera track and permission, captions need transcription).
+- Auto-focus on the active window / selected element (needs the accessibility
+  tree, not just the event tap).
+- Cursor highlights beyond click rings, scene transitions. The segment model
+  (`EffectSegment.kind`) is where these slot in.

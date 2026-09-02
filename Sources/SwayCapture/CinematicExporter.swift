@@ -35,9 +35,10 @@ public struct ExportOptions: Sendable {
     public var codec: AVVideoCodecType
     /// Video bit rate. `nil` lets the codec pick a default.
     public var averageBitRate: Int?
-    /// Caps the output frame rate by skipping source frames. `nil` keeps the
-    /// source timing.
+    /// Output frame rate. `nil` renders at 60 fps.
     public var frameRate: Int?
+    /// Presents the recording as a card on a gradient canvas when enabled.
+    public var canvas: CanvasStyle?
 
     public init(
         size: CGSize? = nil,
@@ -48,7 +49,8 @@ public struct ExportOptions: Sendable {
         trim: ClosedRange<TimeInterval>? = nil,
         codec: AVVideoCodecType = .h264,
         averageBitRate: Int? = nil,
-        frameRate: Int? = nil
+        frameRate: Int? = nil,
+        canvas: CanvasStyle? = nil
     ) {
         self.trim = trim
         self.size = size
@@ -59,6 +61,7 @@ public struct ExportOptions: Sendable {
         self.codec = codec
         self.averageBitRate = averageBitRate
         self.frameRate = frameRate
+        self.canvas = canvas
     }
 }
 
@@ -350,7 +353,8 @@ public final class CinematicExporter {
             camera: camera,
             time: time,
             outputSize: outputSize,
-            cursor: renderer
+            cursor: renderer,
+            canvas: options.canvas
         )
 
         var output: CVPixelBuffer?

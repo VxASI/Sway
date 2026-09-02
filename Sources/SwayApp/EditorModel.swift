@@ -77,12 +77,15 @@ final class EditorModel: ObservableObject {
 
     private let generator = CameraPathGenerator()
     private let camera = CameraBox()
+    private let canvas = CanvasBox()
+    private(set) var preview: PreviewSource!
     private var timeObserver: Any?
 
     var duration: TimeInterval { project.duration }
     var segments: [EffectSegment] { edit.segments }
     var trimStart: TimeInterval { edit.trimStart }
     var trimEnd: TimeInterval { edit.trimEnd }
+    var canvasStyle: CanvasStyle { edit.canvas }
 
     var selectedSegment: EffectSegment? {
         edit.segments.first { $0.id == selectedSegmentID }
@@ -106,19 +109,24 @@ final class EditorModel: ObservableObject {
             duration: result.project.duration,
             segments: result.edit.segments
         )
+        canvas.style = result.edit.canvas
         let cursor = CursorRenderer(
             options: ExportOptions(),
             track: result.track,
             scale: result.project.geometry.scale
         )
-        item.videoComposition = EditorModel.composition(
-            asset: asset,
-            size: CGSize(
+        // The preview renders itself (see PreviewView); the player only
+        // supplies frames and audio.
+        preview = PreviewSource(
+            player: player,
+            item: item,
+            camera: camera,
+            cursor: cursor,
+            canvas: canvas,
+            captureSize: CGSize(
                 width: result.project.geometry.pixelWidth,
                 height: result.project.geometry.pixelHeight
-            ),
-            camera: camera,
-            cursor: cursor
+            )
         )
 
         timeObserver = player.addPeriodicTimeObserver(
@@ -247,6 +255,70 @@ final class EditorModel: ObservableObject {
         return nil
     }
 
+    // MARK: - Canvas
+
+    func setCanvas(_ style: CanvasStyle) {
+        edit.canvas = style.clamped()
+        canvas.style = edit.canvas
+        if !isPlaying { seek(to: playhead) }
+    }
+
+    // MARK: - Smart Focus
+
+    enum SmartFocusMode: String, CaseIterable, Identifiable {
+        case clicks, cursor
+        var id: String { rawValue }
+        var label: String { self == .clicks ? "Auto-focus on clicks" : "Auto-focus on cursor" }
+    }
+
+    /// Replaces the segments with ones generated from the recording itself.
+    /// `.clicks` produces zoom shots anchored on each group of interactions,
+    /// framed slightly above center and held long enough to read; `.cursor`
+    /// produces follow-cursor segments over the same active stretches. The
+    /// springs in the camera generator supply the fast-start, soft-landing
+    /// motion and the ease back to wide framing.
+    func applySmartFocus(mode: SmartFocusMode, zoom: Double) {
+        let detected = FocusDetector().segments(for: track, duration: duration)
+        guard !detected.isEmpty else {
+            errorMessage = "No clicks, drags or scrolls were recorded, so there is nothing to focus on yet."
+            return
+        }
+        let generated = detected.map { shot -> EffectSegment in
+            switch mode {
+            case .clicks:
+                // Camera center sits a little below the target so the target
+                // itself lands slightly above the middle of the frame.
+                return EffectSegment(
+                    kind: .zoom,
+                    start: shot.start,
+                    end: shot.end,
+                    zoom: zoom,
+                    centerX: shot.anchorX,
+                    centerY: min(1, shot.anchorY + 0.06 / max(1, zoom))
+                )
+            case .cursor:
+                return EffectSegment(
+                    kind: .followCursor,
+                    start: shot.start,
+                    end: shot.end,
+                    zoom: zoom,
+                    smoothing: 0.6
+                )
+            }
+        }
+        edit.segments = EffectSegment.resolved(generated, duration: duration)
+        selectedSegmentID = nil
+        regenerateCamera()
+        save()
+    }
+
+    func clearSegments() {
+        edit.segments = []
+        selectedSegmentID = nil
+        regenerateCamera()
+        save()
+    }
+
     // MARK: - Trim
 
     func setTrimStart(_ time: TimeInterval) {
@@ -317,7 +389,8 @@ final class EditorModel: ObservableObject {
             size: settings.sizePreset.size,
             trim: edit.trimStart...edit.trimEnd,
             averageBitRate: bitRate,
-            frameRate: settings.frameRate.value
+            frameRate: settings.frameRate.value,
+            canvas: edit.canvas
         )
         let exporter = CinematicExporter(bundle: bundle, options: options, camera: camera.path)
         Task {
@@ -337,45 +410,35 @@ final class EditorModel: ObservableObject {
         guard let exportedURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([exportedURL])
     }
-
-    // MARK: - Preview composition
-
-    private static func composition(
-        asset: AVAsset,
-        size: CGSize,
-        camera: CameraBox,
-        cursor: CursorRenderer
-    ) -> AVVideoComposition {
-        let composition = AVMutableVideoComposition(asset: asset) { request in
-            let time = request.compositionTime.seconds
-            let state = camera.path.state(at: time)
-                ?? CameraKeyframe(time: time, centerX: 0.5, centerY: 0.5, zoom: 1)
-            let image = CameraFrameRenderer.render(
-                source: request.sourceImage,
-                camera: state,
-                time: time,
-                outputSize: size,
-                cursor: cursor
-            )
-            request.finish(with: image, context: nil)
-        }
-        // The capture only has frames where the screen changed (often ~10
-        // fps), and by default the compositor runs once per source frame. A
-        // fixed 60 Hz frame duration makes it re-render the held frame with
-        // the camera and cursor at their current positions, so playback is as
-        // smooth as the export.
-        composition.frameDuration = CMTime(value: 1, timescale: 60)
-        return composition
-    }
 }
 
-/// Lets the preview composition, which runs on AVFoundation's own queue, read
-/// the latest camera path without rebuilding the composition on every drag.
+/// Lets the preview view, which draws on Metal's schedule, read the latest
+/// camera path without any coordination with the main actor.
 final class CameraBox: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = CameraPath(frameRate: 60, keyframes: [])
 
     var path: CameraPath {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
+        }
+    }
+}
+
+
+/// Same idea as `CameraBox`, for the canvas style.
+final class CanvasBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = CanvasStyle.off
+
+    var style: CanvasStyle {
         get {
             lock.lock()
             defer { lock.unlock() }
