@@ -346,7 +346,7 @@ final class EditorModel: ObservableObject {
         camera: CameraBox,
         cursor: CursorRenderer
     ) -> AVVideoComposition {
-        AVMutableVideoComposition(asset: asset) { request in
+        let composition = AVMutableVideoComposition(asset: asset) { request in
             let time = request.compositionTime.seconds
             let state = camera.path.state(at: time)
                 ?? CameraKeyframe(time: time, centerX: 0.5, centerY: 0.5, zoom: 1)
@@ -359,6 +359,13 @@ final class EditorModel: ObservableObject {
             )
             request.finish(with: image, context: nil)
         }
+        // The capture only has frames where the screen changed (often ~10
+        // fps), and by default the compositor runs once per source frame. A
+        // fixed 60 Hz frame duration makes it re-render the held frame with
+        // the camera and cursor at their current positions, so playback is as
+        // smooth as the export.
+        composition.frameDuration = CMTime(value: 1, timescale: 60)
+        return composition
     }
 }
 

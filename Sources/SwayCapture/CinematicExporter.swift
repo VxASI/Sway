@@ -193,82 +193,113 @@ public final class CinematicExporter {
             scale: project.geometry.scale
         )
         let trimStart = trim?.lowerBound ?? 0
-        let frameStep = options.frameRate.map { 1.0 / Double($0) }
 
+        // Both tracks are pumped at the same time. AVAssetWriter interleaves
+        // its inputs and stops accepting video once it gets too far ahead of
+        // the audio, so draining video first and audio second deadlocks.
+        //
+        // Each pump also reads one sample ahead. The writer only calls back
+        // while it wants more data, and after the final append it may never
+        // call again - so end-of-stream has to be discovered right after that
+        // append, not on the next callback that never comes.
         let videoQueue = DispatchQueue(label: "ai.sway.export.video")
-        var videoFinished = false
-        var nextFrameTime = trimStart
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            videoInput.requestMediaDataWhenReady(on: videoQueue) {
-                FileHandle.standardError.write(Data("[diag] video cb ready=\(videoInput.isReadyForMoreMediaData) writer=\(writer.status.rawValue) reader=\(reader.status.rawValue) err=\(String(describing: writer.error))\n".utf8))
-                while videoInput.isReadyForMoreMediaData {
-                    guard !videoFinished else { return }
-                    guard let sample = videoOutput.copyNextSampleBuffer(),
-                          let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else {
-                        videoFinished = true
-                        videoInput.markAsFinished()
-                        continuation.resume()
-                        return
-                    }
-                    // The recorder starts the movie's timeline at the first
-                    // captured frame, so asset time is recording time - the
-                    // same timeline the cursor track and camera path use.
-                    let relative = CMSampleBufferGetPresentationTimeStamp(sample).seconds
-                    if let trim, relative > trim.upperBound {
-                        videoFinished = true
-                        videoInput.markAsFinished()
-                        continuation.resume()
-                        return
-                    }
-                    // Frame-rate cap: drop source frames until the next slot.
-                    if let frameStep {
-                        guard relative >= nextFrameTime - frameStep / 2 else { continue }
-                        nextFrameTime += frameStep
-                    }
-                    let state = camera.state(at: relative)
-                        ?? CameraKeyframe(time: relative, centerX: 0.5, centerY: 0.5, zoom: 1)
+        let audioQueue = DispatchQueue(label: "ai.sway.export.audio")
+        let audioOffset = CMTime(seconds: -trimStart, preferredTimescale: 600)
 
-                    guard let rendered = self.renderFrame(
-                        pixelBuffer: pixelBuffer,
-                        camera: state,
-                        time: relative,
-                        outputSize: outputSize,
-                        renderer: renderer,
-                        pool: adaptor.pixelBufferPool
-                    ) else { continue }
-                    let outputTime = CMTime(
-                        seconds: max(0, relative - trimStart),
-                        preferredTimescale: 600
-                    )
-                    adaptor.append(rendered, withPresentationTime: outputTime)
-                    progress?(min(0.98, max(0, (relative - trimStart) / exportedDuration)))
+        @Sendable func pumpVideo() async {
+            // Constant-frame-rate output. ScreenCaptureKit only delivers a
+            // frame when the screen changes, so a recording of a mostly
+            // static screen is effectively ~10 fps. Rendering only on source
+            // frames would make the camera moves and the drawn cursor stutter
+            // at that rate, so the output clock ticks at a fixed rate and the
+            // most recent source frame is held between changes.
+            let outputStep = 1.0 / Double(options.frameRate ?? 60)
+            let outputEnd = trim?.upperBound ?? project.duration
+            var finished = false
+            var outputTime = trimStart
+            var current: CVPixelBuffer?
+            var pending = videoOutput.copyNextSampleBuffer()
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                func finish() {
+                    guard !finished else { return }
+                    finished = true
+                    videoInput.markAsFinished()
+                    continuation.resume()
+                }
+                videoInput.requestMediaDataWhenReady(on: videoQueue) {
+                    while videoInput.isReadyForMoreMediaData, !finished {
+                        // Advance the source to the newest frame at or before
+                        // this output tick. The recorder starts the movie's
+                        // timeline at the first captured frame, so asset time
+                        // is recording time - the same timeline the cursor
+                        // track and camera path use.
+                        while let sample = pending,
+                              CMSampleBufferGetPresentationTimeStamp(sample).seconds <= outputTime + outputStep / 2 {
+                            if let buffer = CMSampleBufferGetImageBuffer(sample) { current = buffer }
+                            pending = videoOutput.copyNextSampleBuffer()
+                        }
+                        // Before the first frame, show the first frame.
+                        if current == nil, let sample = pending {
+                            current = CMSampleBufferGetImageBuffer(sample)
+                        }
+                        guard let source = current else { return finish() }
+                        if outputTime > outputEnd + outputStep / 2 { return finish() }
+
+                        let state = camera.state(at: outputTime)
+                            ?? CameraKeyframe(time: outputTime, centerX: 0.5, centerY: 0.5, zoom: 1)
+                        if let rendered = self.renderFrame(
+                            pixelBuffer: source,
+                            camera: state,
+                            time: outputTime,
+                            outputSize: outputSize,
+                            renderer: renderer,
+                            pool: adaptor.pixelBufferPool
+                        ) {
+                            adaptor.append(
+                                rendered,
+                                withPresentationTime: CMTime(
+                                    seconds: max(0, outputTime - trimStart),
+                                    preferredTimescale: 600
+                                )
+                            )
+                            progress?(min(0.98, max(0, (outputTime - trimStart) / exportedDuration)))
+                        }
+                        outputTime += outputStep
+                    }
                 }
             }
         }
 
-        if let audioInput, let audioOutput {
-            let audioQueue = DispatchQueue(label: "ai.sway.export.audio")
-            var audioFinished = false
-            let offset = CMTime(seconds: -trimStart, preferredTimescale: 600)
+        let audioPair = audioInput.flatMap { input in audioOutput.map { (input, $0) } }
+        @Sendable func pumpAudio() async {
+            guard let (audioInput, audioOutput) = audioPair else { return }
+            var finished = false
+            var pending = audioOutput.copyNextSampleBuffer()
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                func finish() {
+                    guard !finished else { return }
+                    finished = true
+                    audioInput.markAsFinished()
+                    continuation.resume()
+                }
                 audioInput.requestMediaDataWhenReady(on: audioQueue) {
-                    while audioInput.isReadyForMoreMediaData {
-                        guard !audioFinished else { return }
-                        guard let sample = audioOutput.copyNextSampleBuffer() else {
-                            audioFinished = true
-                            audioInput.markAsFinished()
-                            continuation.resume()
-                            return
-                        }
+                    while audioInput.isReadyForMoreMediaData, !finished {
+                        guard let sample = pending else { return finish() }
+                        pending = audioOutput.copyNextSampleBuffer()
                         // Align audio with the trimmed video's new zero.
                         let shifted = trimStart > 0
-                            ? CinematicExporter.retimed(sample, by: offset) ?? sample
+                            ? CinematicExporter.retimed(sample, by: audioOffset) ?? sample
                             : sample
                         audioInput.append(shifted)
                     }
+                    if pending == nil { finish() }
                 }
             }
         }
+
+        async let video: Void = pumpVideo()
+        async let audio: Void = pumpAudio()
+        _ = await (video, audio)
 
         await writer.finishWriting()
         if writer.status == .failed, let error = writer.error {
@@ -350,12 +381,15 @@ public struct CursorRenderer {
     let track: CursorTrack
     let scale: Double
     private let clickTimes: [TimeInterval]
+    /// The arrow, rasterized once at the origin; each frame only translates it.
+    private let arrow: CIImage?
 
     public init(options: ExportOptions, track: CursorTrack, scale: Double) {
         self.options = options
         self.track = track
         self.scale = scale
         self.clickTimes = track.events.filter { $0.type.isClickDown }.map(\.time)
+        self.arrow = CursorRenderer.rasterizeArrow(size: 24.0 * scale * options.cursorScale)
     }
 
     /// Cursor coordinates are normalized to the whole capture, so the overlay
@@ -385,7 +419,7 @@ public struct CursorRenderer {
         let progress = (time - click) / options.clickRingDuration
         let radius = size * (0.6 + 1.4 * progress)
         let alpha = 1 - progress
-        return drawing(size: CGSize(width: radius * 2 + 8, height: radius * 2 + 8), origin: CGPoint(
+        return CursorRenderer.drawing(size: CGSize(width: radius * 2 + 8, height: radius * 2 + 8), origin: CGPoint(
             x: center.x - radius - 4,
             y: center.y - radius - 4
         )) { context in
@@ -401,6 +435,16 @@ public struct CursorRenderer {
     }
 
     private func arrowImage(center: CGPoint, size: Double) -> CIImage? {
+        let padding = size * 0.2
+        let height = size + padding * 2
+        // Places the tip exactly on the recorded cursor position.
+        return arrow?.transformed(by: CGAffineTransform(
+            translationX: center.x - padding,
+            y: center.y - height + padding
+        ))
+    }
+
+    private static func rasterizeArrow(size: Double) -> CIImage? {
         // Arrow outline in a unit box with the hotspot (the tip) at (0, 0) and
         // y growing downwards, the way a cursor is normally described.
         let points: [CGPoint] = [
@@ -412,8 +456,7 @@ public struct CursorRenderer {
         let height = size + padding * 2
         return drawing(
             size: CGSize(width: size + padding * 2, height: height),
-            // Places the tip exactly on the recorded cursor position.
-            origin: CGPoint(x: center.x - padding, y: center.y - height + padding)
+            origin: .zero
         ) { context in
             context.setShadow(offset: CGSize(width: 0, height: -size * 0.05), blur: size * 0.12)
             let path = CGMutablePath()
@@ -435,7 +478,7 @@ public struct CursorRenderer {
         }
     }
 
-    private func drawing(
+    private static func drawing(
         size: CGSize,
         origin: CGPoint,
         _ body: (CGContext) -> Void

@@ -1,4 +1,5 @@
-import AVKit
+import AVFoundation
+import AppKit
 import SwayCore
 import SwiftUI
 
@@ -89,8 +90,7 @@ private struct EditorContentView: View {
     /// The player with, when a zoom segment is selected, a draggable reticle
     /// that sets the segment's focal point on the recording itself.
     private var preview: some View {
-        VideoPlayer(player: editor.player)
-            .disabled(true)
+        PlayerLayerView(player: editor.player)
             .aspectRatio(editor.project.geometry.aspectRatio, contentMode: .fit)
             .overlay {
                 if let segment = editor.selectedSegment, segment.kind == .zoom, !editor.isPlaying {
@@ -249,6 +249,44 @@ private struct EditorContentView: View {
                       Int(total) % 60,
                       Int((total - total.rounded(.down)) * 100))
     }
+}
+
+/// The preview surface: a bare `AVPlayerLayer` in an `NSView`, no controls.
+///
+/// SwiftUI's `VideoPlayer` (the `_AVKit_SwiftUI` overlay) aborts at class
+/// metadata initialization when the app is built as a plain SwiftPM
+/// executable - "superclass not found" for its AVKit-backed view - which is
+/// exactly the crash on opening the editor. AVFoundation alone has no such
+/// dependency, and the editor never wanted the system controls anyway.
+private struct PlayerLayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> PlayerLayerHostView {
+        let view = PlayerLayerHostView()
+        view.playerLayer.player = player
+        return view
+    }
+
+    func updateNSView(_ view: PlayerLayerHostView, context: Context) {
+        if view.playerLayer.player !== player {
+            view.playerLayer.player = player
+        }
+    }
+}
+
+private final class PlayerLayerHostView: NSView {
+    let playerLayer = AVPlayerLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        playerLayer.videoGravity = .resizeAspect
+        playerLayer.backgroundColor = NSColor.black.cgColor
+        layer = playerLayer
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not used") }
 }
 
 /// A draggable ring over the preview that positions a zoom segment's focal

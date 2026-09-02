@@ -20,9 +20,7 @@ final class CinematicExporterTests: XCTestCase {
             .appendingPathComponent("exporter-tests-\(UUID().uuidString).sway")
         bundle = SwayProjectBundle(url: bundleURL)
         try bundle.createDirectory()
-        FileHandle.standardError.write(Data("[diag] setUp: writing test movie\n".utf8))
         try await writeTestMovie(to: bundle.videoURL)
-        FileHandle.standardError.write(Data("[diag] setUp: movie written\n".utf8))
 
         var events: [CursorEvent] = []
         var t: TimeInterval = 0
@@ -68,9 +66,7 @@ final class CinematicExporterTests: XCTestCase {
 
         let progressValues = ProgressCollector()
         let exporter = CinematicExporter(bundle: bundle, options: ExportOptions(), camera: camera)
-        FileHandle.standardError.write(Data("[diag] test: exporting\n".utf8))
         try await exporter.export(to: output) { progressValues.record($0) }
-        FileHandle.standardError.write(Data("[diag] test: export done\n".utf8))
 
         let asset = AVURLAsset(url: output)
         let exportedDuration = try await asset.load(.duration).seconds

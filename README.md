@@ -44,12 +44,14 @@ rather than pushing past the edge.
 exporter can draw a larger, smoothed cursor with a shadow and click rings from
 the recorded events.
 
-**The focus range is an edit, not a detection.** The editor's camera is driven
-by one explicit range on the timeline. Outside it the camera sits at 1x, dead
-center, showing the complete recording; inside it the camera zooms in and
-follows the recorded cursor with the dead zone, springs and edge clamping
-above, then eases back out at the end. Click detection only supplies the
-initial suggestion for where that range goes.
+**Effects are edits, not detections.** The editor's camera is driven by
+non-overlapping effect segments on the timeline. Outside them the camera sits
+at 1x, dead center, showing the complete recording. A **Zoom** segment holds a
+fixed focal point the user aims by dragging a ring on the preview; a **Follow
+Cursor** segment zooms in and tracks the recorded cursor with the dead zone,
+springs and edge clamping above, with a per-segment smoothing amount. Both ease
+in and out through the springs. Click detection only supplies the initial
+suggested segment.
 
 ## The app
 
@@ -59,17 +61,27 @@ open .build/Sway.app
 ```
 
 ```
-Record -> pick a display or window -> record -> stop (Shift-Cmd-S)
-  -> processed automatically -> editor -> drag the focus range -> Export
+Record -> pick a display or window, fps, system audio -> 3-2-1 -> record
+  -> stop (Shift-Cmd-S) -> editor -> add Zoom / Follow Cursor segments
+  -> Export (preset, quality, fps, progress, Reveal in Finder)
 ```
 
-The picker lists every display and window with a live thumbnail and its macOS
-name ("Built-in Display", "LG Monitor"). While recording, the main window hides
-and a floating capsule shows the elapsed time and Stop; Sway itself is excluded
-from display captures. The editor shows the preview with the camera applied
-live, a playhead, trim handles, and one focus range drawn as a colored bar whose
-edges drag independently, plus a zoom amount and Export. No audio, microphone or
-webcam yet.
+The welcome screen is also the library: every recording in `~/Movies/Sway`
+with a thumbnail, reopened with one click. The picker lists every display and
+window with a live thumbnail and its macOS name ("Built-in Display", "LG
+Monitor"), plus 30/60 fps and a system-audio toggle. Start runs a floating,
+cancellable countdown before capture begins. While recording, the main window
+hides and a floating capsule shows the elapsed time and Stop; Sway itself is
+excluded from display captures.
+
+The editor shows the preview with the camera applied live (the same renderer
+the exporter uses, so preview is export), a playhead, trim handles, a zoomable
+timeline, and any number of effect segments drawn as colored bars that select,
+move and resize by dragging. A selected segment's intensity, smoothing and (for
+Zoom) focal point are edited inline; the project name is editable in the
+toolbar. Export offers Original / 1920x1080 / 1080x1920 / 1080x1080 (aspect-
+filled, never stretched), Standard / High quality, an optional 30 fps cap, a
+progress bar and Reveal in Finder. Trimmed exports keep their audio.
 
 ## CLI
 
@@ -133,7 +145,15 @@ demo.sway/
   screen.mov     H.264 + system audio, no cursor
   cursor.json    every cursor event, normalized, video-relative seconds
   camera.json    generated camera keyframes (center + zoom over time)
-  edit.json      trim points and the focus range the camera was generated from
+  edit.json      trim points and the effect segments the camera was generated from
+```
+
+`edit.json` segments look like (`kind` is `zoom` or `followCursor`; older files
+with a single `focus` range load as one follow-cursor segment):
+
+```json
+{ "id": "…", "kind": "zoom", "start": 3.2, "end": 6.8, "zoom": 2.0,
+  "centerX": 0.62, "centerY": 0.41, "smoothing": 0.5 }
 ```
 
 `cursor.json` events look like:
@@ -155,13 +175,17 @@ space; the visible viewport is `1 / zoom` of the capture on each axis.
 | `sway` | CLI | `record`, `export`, `inspect`, `recamera` |
 
 `SwayCore` is platform-independent and holds all the timing and camera math, so
-it is unit tested with `swift test` on any platform.
+it is unit tested with `swift test` on any platform. `SwayCaptureTests` (macOS)
+synthesizes a real movie + cursor track and runs the exporter end to end:
+segments baked in, progress, trimmed audio, aspect presets, frame-rate cap.
 
 ## Not implemented yet
 
 - Microphone and camera tracks (system audio only).
+- Pause/resume during recording (ScreenCaptureKit has no pause; it needs
+  timestamp re-basing across both the movie and the cursor track).
 - Auto-hiding the cursor while typing (needs keyboard events in the tap).
 - Region capture is passed to `SCStreamConfiguration.sourceRect`, which requires
   macOS 14; on macOS 13 the full display is captured.
-- More than one focus range per recording, and any other clip-level editing.
-- Trimmed exports drop the audio track (only the video is re-timed).
+- Cursor highlights, click effects, backgrounds, captions, scene transitions.
+  The segment model (`EffectSegment.kind`) is where these slot in.
