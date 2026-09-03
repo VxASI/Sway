@@ -44,7 +44,7 @@ struct ExportSettings {
     enum FrameRate: String, CaseIterable, Identifiable {
         case original, fps30
         var id: String { rawValue }
-        var label: String { self == .original ? "Original" : "30 fps" }
+        var label: String { self == .original ? "60 fps" : "30 fps" }
         var value: Int? { self == .original ? nil : 30 }
     }
 
@@ -81,7 +81,7 @@ final class EditorModel: ObservableObject {
     private let cursor = CursorBox()
     private let shapes: CursorShapeTrack
     private let shapeImages: [String: CGImage]
-    private(set) var preview: PreviewSource!
+    let preview: PreviewSource
     private var timeObserver: Any?
 
     var duration: TimeInterval { project.duration }
@@ -175,6 +175,11 @@ final class EditorModel: ObservableObject {
         isPlaying = false
     }
 
+    /// Bumped when a seek has actually landed, so the paused preview redraws
+    /// with the new frame rather than the one that was current when the seek
+    /// was requested.
+    @Published private(set) var frameRevision = 0
+
     func seek(to time: TimeInterval) {
         let clamped = min(max(time, edit.trimStart), edit.trimEnd)
         playhead = clamped
@@ -182,7 +187,10 @@ final class EditorModel: ObservableObject {
             to: CMTime(seconds: clamped, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
-        )
+        ) { [weak self] finished in
+            guard finished else { return }
+            Task { @MainActor [weak self] in self?.frameRevision &+= 1 }
+        }
     }
 
     private func tick(_ seconds: TimeInterval) {

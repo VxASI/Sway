@@ -123,6 +123,10 @@ final class CanvasAssets: @unchecked Sendable {
     private let lock = NSLock()
     private var cache: [Key: Assets] = [:]
     private var order: [Key] = []
+    /// Used once per cache entry to bake the blurred gradient and shadow into
+    /// bitmaps. Without this they would be re-evaluated (blur included) on
+    /// every frame, since a CIImage is a recipe, not pixels.
+    private let bakeContext = CIContext(options: [.cacheIntermediates: false])
 
     func assets(for style: CanvasStyle, outputSize: CGSize) -> Assets {
         let key = Key(style: style, width: Int(outputSize.width), height: Int(outputSize.height))
@@ -177,10 +181,18 @@ final class CanvasAssets: @unchecked Sendable {
 
         return Assets(
             contentRect: contentRect,
-            background: CanvasAssets.gradient(style.background, size: outputSize),
-            shadow: shadow,
+            background: baked(CanvasAssets.gradient(style.background, size: outputSize), size: outputSize),
+            shadow: shadow.map { baked($0, size: outputSize) },
             mask: mask
         )
+    }
+
+    /// Renders a recipe to pixels once so per-frame compositing is a plain
+    /// texture blend.
+    private func baked(_ image: CIImage, size: CGSize) -> CIImage {
+        let rect = CGRect(origin: .zero, size: size)
+        guard let cgImage = bakeContext.createCGImage(image, from: rect) else { return image }
+        return CIImage(cgImage: cgImage)
     }
 
     /// Large soft color blobs over a base color, blurred into one another.

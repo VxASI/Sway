@@ -90,6 +90,7 @@ final class AppModel: ObservableObject {
     /// before anything useful has happened.
     func showPicker() {
         log.info("record tapped")
+        editor?.pause()
         phase = .picking
         reloadSources()
     }

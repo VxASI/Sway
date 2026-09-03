@@ -26,8 +26,9 @@ struct PreviewView: NSViewRepresentable {
 
     func updateNSView(_ view: PreviewMetalView, context: Context) {
         view.isPlaying = editor.isPlaying
-        // Any published change (seek, segment drag, style edit) is a reason to
-        // redraw the paused frame.
+        // Any published change (a landed seek via `frameRevision`, a segment
+        // drag, a style edit) is a reason to redraw the paused frame.
+        _ = editor.frameRevision
         if !editor.isPlaying { view.setNeedsDisplay(view.bounds) }
     }
 }
@@ -66,6 +67,7 @@ final class PreviewMetalView: MTKView, MTKViewDelegate {
     private let source: PreviewSource
     private let renderer: MetalFrameRenderer?
     private var lastPixelBuffer: CVPixelBuffer?
+    private var firstFrameRetries = 0
 
     /// While playing the view runs its own 60 Hz loop; paused, it only redraws
     /// on demand so an idle editor costs nothing.
@@ -74,7 +76,13 @@ final class PreviewMetalView: MTKView, MTKViewDelegate {
             guard isPlaying != oldValue else { return }
             isPaused = !isPlaying
             enableSetNeedsDisplay = !isPlaying
-            if !isPlaying { setNeedsDisplay(bounds) }
+            if isPlaying {
+                // An output that was not polled for a while suspends itself;
+                // this wakes it before the first frame is needed.
+                source.output.requestNotificationOfMediaDataChange(withAdvanceInterval: 0.05)
+            } else {
+                setNeedsDisplay(bounds)
+            }
         }
     }
 
@@ -110,6 +118,16 @@ final class PreviewMetalView: MTKView, MTKViewDelegate {
         if source.output.hasNewPixelBuffer(forItemTime: itemTime),
            let buffer = source.output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
             lastPixelBuffer = buffer
+        } else if lastPixelBuffer == nil, firstFrameRetries < 100 {
+            // Nothing decoded yet (first open, or a suspended output): ask for
+            // frames and try again shortly, for up to ~5 s.
+            firstFrameRetries += 1
+            source.output.requestNotificationOfMediaDataChange(withAdvanceInterval: 0.05)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self else { return }
+                self.setNeedsDisplay(self.bounds)
+            }
+            return
         }
         guard let pixelBuffer = lastPixelBuffer else { return }
 
