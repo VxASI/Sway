@@ -238,6 +238,21 @@ final class EditorModel: ObservableObject {
         regenerateCamera()
     }
 
+    /// Slides a segment to a new start, keeping its length and stopping at
+    /// its neighbors and the recording's ends instead of shrinking it.
+    func moveSegment(id: UUID, toStart start: TimeInterval, duration length: TimeInterval) {
+        guard let index = edit.segments.firstIndex(where: { $0.id == id }) else { return }
+        let lower = index > 0 ? edit.segments[index - 1].end : 0
+        let upper = index < edit.segments.count - 1 ? edit.segments[index + 1].start : duration
+        guard upper - lower >= length else { return }
+        var moved = edit.segments[index]
+        moved.start = min(max(start, lower), upper - length)
+        moved.end = moved.start + length
+        guard moved != edit.segments[index] else { return }
+        edit.segments[index] = moved
+        regenerateCamera()
+    }
+
     func removeSegment(id: UUID) {
         edit.segments.removeAll { $0.id == id }
         if selectedSegmentID == id { selectedSegmentID = nil }

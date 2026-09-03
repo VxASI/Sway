@@ -18,6 +18,10 @@ struct SegmentTimelineView: View {
 
     private let handleWidth: CGFloat = 10
     private let barHeight: CGFloat = 56
+    /// The segment as it was when a move drag began. `DragGesture` reports a
+    /// cumulative translation, so the move must be applied to the original,
+    /// not to the segment as re-rendered mid-drag.
+    @State private var dragOrigin: EffectSegment?
 
     var body: some View {
         GeometryReader { geometry in
@@ -35,12 +39,13 @@ struct SegmentTimelineView: View {
         let time = { (point: CGFloat) in
             min(max(0, TimeInterval(point / max(width, 1)) * duration), duration)
         }
+        let secondsPerPoint = duration / Double(max(width, 1))
 
         return ZStack(alignment: .topLeading) {
             track(width: width, x: x)
 
             ForEach(editor.segments) { segment in
-                segmentBar(segment: segment, x: x, time: time)
+                segmentBar(segment: segment, x: x, time: time, secondsPerPoint: secondsPerPoint)
             }
 
             // Trim handles.
@@ -80,7 +85,8 @@ struct SegmentTimelineView: View {
     private func segmentBar(
         segment: EffectSegment,
         x: @escaping (TimeInterval) -> CGFloat,
-        time: @escaping (CGFloat) -> TimeInterval
+        time: @escaping (CGFloat) -> TimeInterval,
+        secondsPerPoint: Double
     ) -> some View {
         let start = x(segment.start)
         let end = x(segment.end)
@@ -118,15 +124,15 @@ struct SegmentTimelineView: View {
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             editor.selectedSegmentID = segment.id
-                            let delta = time(value.translation.width) - time(0)
-                            guard delta != 0 else { return }
-                            var moved = segment
-                            moved.start = segment.start + delta
-                            moved.end = segment.end + delta
-                            guard moved.start >= 0, moved.end <= editor.duration else { return }
-                            editor.updateSegment(moved)
+                            let origin = dragOrigin ?? segment
+                            if dragOrigin == nil { dragOrigin = segment }
+                            let delta = Double(value.translation.width) * secondsPerPoint
+                            editor.moveSegment(id: origin.id, toStart: origin.start + delta, duration: origin.duration)
                         }
-                        .onEnded { _ in editor.save() }
+                        .onEnded { _ in
+                            dragOrigin = nil
+                            editor.save()
+                        }
                 )
 
             if isSelected {
