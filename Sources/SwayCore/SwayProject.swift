@@ -63,6 +63,8 @@ public struct SwayProjectBundle {
     public static let cursorFileName = "cursor.json"
     public static let cameraFileName = "camera.json"
     public static let editFileName = "edit.json"
+    public static let shapesFileName = "shapes.json"
+    public static let cursorsDirectoryName = "cursors"
     public static let pathExtension = "sway"
 
     public let url: URL
@@ -76,6 +78,10 @@ public struct SwayProjectBundle {
     public var cursorURL: URL { url.appendingPathComponent(SwayProjectBundle.cursorFileName) }
     public var cameraURL: URL { url.appendingPathComponent(SwayProjectBundle.cameraFileName) }
     public var editURL: URL { url.appendingPathComponent(SwayProjectBundle.editFileName) }
+    public var shapesURL: URL { url.appendingPathComponent(SwayProjectBundle.shapesFileName) }
+    public var cursorsDirectoryURL: URL {
+        url.appendingPathComponent(SwayProjectBundle.cursorsDirectoryName, isDirectory: true)
+    }
 
     @discardableResult
     public func createDirectory() throws -> URL {
@@ -124,6 +130,21 @@ public struct SwayProjectBundle {
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(project).write(to: projectURL, options: .atomic)
+    }
+
+    public func write(shapes: CursorShapeTrack) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(shapes).write(to: shapesURL, options: .atomic)
+    }
+
+    /// Empty for bundles recorded before pointer shapes were captured.
+    public func readShapes() -> CursorShapeTrack {
+        guard let data = try? Data(contentsOf: shapesURL),
+              let shapes = try? JSONDecoder().decode(CursorShapeTrack.self, from: data) else {
+            return CursorShapeTrack()
+        }
+        return shapes
     }
 
     public func write(camera: CameraPath) throws {

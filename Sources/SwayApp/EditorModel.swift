@@ -78,6 +78,9 @@ final class EditorModel: ObservableObject {
     private let generator = CameraPathGenerator()
     private let camera = CameraBox()
     private let canvas = CanvasBox()
+    private let cursor = CursorBox()
+    private let shapes: CursorShapeTrack
+    private let shapeImages: [String: CGImage]
     private(set) var preview: PreviewSource!
     private var timeObserver: Any?
 
@@ -86,6 +89,10 @@ final class EditorModel: ObservableObject {
     var trimStart: TimeInterval { edit.trimStart }
     var trimEnd: TimeInterval { edit.trimEnd }
     var canvasStyle: CanvasStyle { edit.canvas }
+    var cursorStyle: CursorStyle { edit.cursor }
+    /// Whether this recording captured the system pointer shapes.
+    var hasRecordedShapes: Bool { !shapes.isEmpty }
+    var recordsKeyPresses: Bool { track.events.contains { $0.type == .keyDown } }
 
     var selectedSegment: EffectSegment? {
         edit.segments.first { $0.id == selectedSegmentID }
@@ -110,9 +117,13 @@ final class EditorModel: ObservableObject {
             segments: result.edit.segments
         )
         canvas.style = result.edit.canvas
-        let cursor = CursorRenderer(
-            options: ExportOptions(),
+        shapes = result.shapes
+        shapeImages = CursorRenderer.loadShapeImages(for: result.shapes, in: result.bundle)
+        cursor.renderer = CursorRenderer(
+            style: result.edit.cursor,
             track: result.track,
+            shapes: result.shapes,
+            shapeImages: shapeImages,
             scale: result.project.geometry.scale
         )
         // The preview renders itself (see PreviewView); the player only
@@ -263,6 +274,20 @@ final class EditorModel: ObservableObject {
         if !isPlaying { seek(to: playhead) }
     }
 
+    // MARK: - Cursor
+
+    func setCursor(_ style: CursorStyle) {
+        edit.cursor = style.clamped()
+        cursor.renderer = CursorRenderer(
+            style: edit.cursor,
+            track: track,
+            shapes: shapes,
+            shapeImages: shapeImages,
+            scale: project.geometry.scale
+        )
+        if !isPlaying { seek(to: playhead) }
+    }
+
     // MARK: - Smart Focus
 
     enum SmartFocusMode: String, CaseIterable, Identifiable {
@@ -385,13 +410,14 @@ final class EditorModel: ObservableObject {
         )
         let fps = Double(settings.frameRate.value ?? 60)
         let bitRate = Int(outputSize.width * outputSize.height * fps * settings.quality.bitsPerPixel)
-        let options = ExportOptions(
+        var options = ExportOptions(
             size: settings.sizePreset.size,
             trim: edit.trimStart...edit.trimEnd,
             averageBitRate: bitRate,
             frameRate: settings.frameRate.value,
             canvas: edit.canvas
         )
+        options.cursor = edit.cursor
         let exporter = CinematicExporter(bundle: bundle, options: options, camera: camera.path)
         Task {
             do {
@@ -439,6 +465,26 @@ final class CanvasBox: @unchecked Sendable {
     private var storage = CanvasStyle.off
 
     var style: CanvasStyle {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
+        }
+    }
+}
+
+/// Same idea again, for the cursor renderer, which is rebuilt whenever the
+/// cursor style changes.
+final class CursorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: CursorRenderer?
+
+    var renderer: CursorRenderer? {
         get {
             lock.lock()
             defer { lock.unlock() }

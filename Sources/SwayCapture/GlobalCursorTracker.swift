@@ -46,32 +46,54 @@ public final class GlobalCursorTracker: @unchecked Sendable {
         self.sampleHz = sampleHz
     }
 
-    private static let eventMask: CGEventMask = {
-        let types: [CGEventType] = [
-            .mouseMoved,
-            .leftMouseDown, .leftMouseUp,
-            .rightMouseDown, .rightMouseUp,
-            .leftMouseDragged, .rightMouseDragged,
-            .scrollWheel
-        ]
-        return types.reduce(CGEventMask(0)) { $0 | (1 << CGEventMask($1.rawValue)) }
-    }()
+    private static let mouseTypes: [CGEventType] = [
+        .mouseMoved,
+        .leftMouseDown, .leftMouseUp,
+        .rightMouseDown, .rightMouseUp,
+        .leftMouseDragged, .rightMouseDragged,
+        .scrollWheel
+    ]
+
+    private static func mask(_ types: [CGEventType]) -> CGEventMask {
+        types.reduce(CGEventMask(0)) { $0 | (1 << CGEventMask($1.rawValue)) }
+    }
+
+    /// Whether key presses are being recorded (timestamps only). False when
+    /// the system only allowed a mouse-only tap.
+    public private(set) var recordsKeyPresses = false
 
     public func start() throws {
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        guard let tap = CGEvent.tapCreate(
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else { return Unmanaged.passUnretained(event) }
+            let tracker = Unmanaged<GlobalCursorTracker>.fromOpaque(refcon).takeUnretainedValue()
+            tracker.handle(type: type, event: event)
+            return Unmanaged.passUnretained(event)
+        }
+        // Key presses let the editor hide the cursor while typing. Only the
+        // moment is kept, never the key. If the system refuses a tap that
+        // includes keyboard events, fall back to mouse-only rather than
+        // failing the recording.
+        var tapOrNil = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
-            eventsOfInterest: GlobalCursorTracker.eventMask,
-            callback: { _, type, event, refcon in
-                guard let refcon else { return Unmanaged.passUnretained(event) }
-                let tracker = Unmanaged<GlobalCursorTracker>.fromOpaque(refcon).takeUnretainedValue()
-                tracker.handle(type: type, event: event)
-                return Unmanaged.passUnretained(event)
-            },
+            eventsOfInterest: GlobalCursorTracker.mask(GlobalCursorTracker.mouseTypes + [.keyDown]),
+            callback: callback,
             userInfo: refcon
-        ) else {
+        )
+        recordsKeyPresses = tapOrNil != nil
+        if tapOrNil == nil {
+            tapOrNil = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .listenOnly,
+                eventsOfInterest: GlobalCursorTracker.mask(GlobalCursorTracker.mouseTypes),
+                callback: callback,
+                userInfo: refcon
+            )
+        }
+        guard let tap = tapOrNil else {
             throw CursorTrackingError.eventTapCreationFailed
         }
 
@@ -165,6 +187,7 @@ public final class GlobalCursorTracker: @unchecked Sendable {
         case .leftMouseDragged: return .leftMouseDragged
         case .rightMouseDragged: return .rightMouseDragged
         case .scrollWheel: return .scrollWheel
+        case .keyDown: return .keyDown
         default: return nil
         }
     }

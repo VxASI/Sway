@@ -12,6 +12,9 @@ public enum CursorEventType: String, Codable, Sendable {
     case scrollWheel
     /// Periodic position verification, emitted even when no input happens.
     case sample
+    /// A key was pressed. Only the moment is recorded - never which key - so
+    /// the editor can hide the cursor while the user types.
+    case keyDown
 
     public var isClickDown: Bool {
         self == .leftMouseDown || self == .rightMouseDown

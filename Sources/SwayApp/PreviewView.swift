@@ -37,7 +37,7 @@ final class PreviewSource {
     let player: AVPlayer
     let output: AVPlayerItemVideoOutput
     let camera: CameraBox
-    let cursor: CursorRenderer
+    let cursor: CursorBox
     let canvas: CanvasBox
     let captureSize: CGSize
 
@@ -45,7 +45,7 @@ final class PreviewSource {
         player: AVPlayer,
         item: AVPlayerItem,
         camera: CameraBox,
-        cursor: CursorRenderer,
+        cursor: CursorBox,
         canvas: CanvasBox,
         captureSize: CGSize
     ) {
@@ -121,7 +121,7 @@ final class PreviewMetalView: MTKView, MTKViewDelegate {
             camera: state,
             time: time,
             outputSize: drawableSize,
-            cursor: source.cursor,
+            cursor: source.cursor.renderer,
             canvas: source.canvas.style
         )
 

@@ -35,8 +35,7 @@ private struct EditorContentView: View {
             SegmentTimelineView(editor: editor, scale: timelineScale)
                 .frame(height: 78)
                 .padding(.horizontal, 20)
-            inspector
-            canvasBar
+            InspectorPanel(editor: editor)
         }
         .background(Color(red: 0.09, green: 0.09, blue: 0.11))
         .alert("Sway", isPresented: errorBinding) {
@@ -168,39 +167,91 @@ private struct EditorContentView: View {
         .padding(.vertical, 10)
     }
 
-    // MARK: - Inspector
+    private var errorBinding: Binding<Bool> {
+        Binding(
+            get: { editor.errorMessage != nil },
+            set: { if !$0 { editor.errorMessage = nil } }
+        )
+    }
+
+    static func timecode(_ time: TimeInterval) -> String {
+        let total = max(0, time)
+        return String(format: "%02d:%02d.%02d",
+                      Int(total) / 60,
+                      Int(total) % 60,
+                      Int((total - total.rounded(.down)) * 100))
+    }
+}
+
+
+/// The controls under the timeline, in three tabs so the editor stays compact:
+/// the selected segment, the cursor, and the canvas.
+private struct InspectorPanel: View {
+    @ObservedObject var editor: EditorModel
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case segment, cursor, canvas
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .segment: return "Segment"
+            case .cursor: return "Cursor"
+            case .canvas: return "Canvas"
+            }
+        }
+    }
+
+    @State private var tab: Tab = .segment
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 260)
+
+            Group {
+                switch tab {
+                case .segment: segmentControls
+                case .cursor: cursorControls
+                case .canvas: canvasControls
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 30)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.03))
+        .onChange(of: editor.selectedSegmentID) { id in
+            if id != nil { tab = .segment }
+        }
+    }
+
+    // MARK: Segment
 
     @ViewBuilder
-    private var inspector: some View {
+    private var segmentControls: some View {
         HStack(spacing: 16) {
             if let segment = editor.selectedSegment {
                 Label(
                     segment.kind == .zoom ? "Zoom" : "Follow Cursor",
-                    systemImage: segment.kind == .zoom
-                        ? "plus.magnifyingglass"
-                        : "cursorarrow.motionlines"
+                    systemImage: segment.kind == .zoom ? "plus.magnifyingglass" : "cursorarrow.motionlines"
                 )
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(segment.kind == .zoom ? Color.purple : Color.blue)
 
-                slider(
-                    "Intensity",
-                    value: segment.zoom,
-                    in: 1.2...4,
-                    format: { String(format: "%.1f×", $0) }
-                ) { value in
+                slider("Intensity", value: segment.zoom, in: 1.2...4,
+                       format: { String(format: "%.1f×", $0) }) { value in
                     var updated = segment
                     updated.zoom = value
                     editor.updateSegment(updated)
                 }
-
                 if segment.kind == .followCursor {
-                    slider(
-                        "Smoothing",
-                        value: segment.smoothing,
-                        in: 0...1,
-                        format: { String(format: "%.0f%%", $0 * 100) }
-                    ) { value in
+                    slider("Smoothing", value: segment.smoothing, in: 0...1,
+                           format: { String(format: "%.0f%%", $0 * 100) }) { value in
                         var updated = segment
                         updated.smoothing = value
                         editor.updateSegment(updated)
@@ -210,9 +261,7 @@ private struct EditorContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-
                 Spacer()
-
                 Button(role: .destructive) {
                     editor.removeSegment(id: segment.id)
                 } label: {
@@ -225,73 +274,128 @@ private struct EditorContentView: View {
                 Spacer()
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .frame(height: 48)
-        .background(Color.white.opacity(0.03))
     }
 
-    // MARK: - Canvas
+    // MARK: Cursor
 
-    /// The "clean" look: recording as a rounded card on a gradient canvas.
-    private var canvasBar: some View {
-        let style = editor.canvasStyle
-        return HStack(spacing: 16) {
-            Toggle(isOn: Binding(
-                get: { style.isEnabled },
-                set: { on in
-                    var updated = style
-                    updated.isEnabled = on
-                    editor.setCanvas(updated)
+    private var cursorControls: some View {
+        let style = editor.cursorStyle
+        func update(_ change: (inout CursorStyle) -> Void) {
+            var updated = style
+            change(&updated)
+            editor.setCursor(updated)
+        }
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 16) {
+                Toggle("Show", isOn: Binding(get: { style.isVisible }, set: { on in
+                    update { $0.isVisible = on }
                     editor.save()
+                }))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                slider("Size", value: style.size, in: 0.5...3,
+                       format: { String(format: "%.1f×", $0) }) { value in update { $0.size = value } }
+                slider("Smoothing", value: style.smoothing, in: 0...1,
+                       format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.smoothing = value } }
+
+                Picker("Shape", selection: Binding(get: { style.shape }, set: { shape in
+                    update { $0.shape = shape }
+                    editor.save()
+                })) {
+                    ForEach(CursorStyle.Shape.allCases) { Text($0.label).tag($0) }
                 }
-            )) {
-                Label("Canvas", systemImage: "rectangle.inset.filled")
-                    .font(.callout.weight(.semibold))
+                .frame(width: 170)
+                .disabled(!editor.hasRecordedShapes)
+                .help(editor.hasRecordedShapes
+                    ? "Draw the pointer the system showed, or Sway's arrow"
+                    : "This recording predates pointer-shape capture; the arrow is used")
+
+                Toggle("Click rings", isOn: Binding(get: { style.clickRings }, set: { on in
+                    update { $0.clickRings = on }
+                    editor.save()
+                }))
+                .toggleStyle(.checkbox)
+                if style.clickRings {
+                    Picker("", selection: Binding(get: { style.ringColor }, set: { color in
+                        update { $0.ringColor = color }
+                        editor.save()
+                    })) {
+                        ForEach(CursorStyle.RingColor.allCases) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 90)
+                }
+
+                Toggle("Spotlight", isOn: Binding(get: { style.spotlight }, set: { on in
+                    update { $0.spotlight = on }
+                    editor.save()
+                }))
+                .toggleStyle(.checkbox)
+
+                Toggle("Hide when idle", isOn: Binding(get: { style.hideWhenIdle }, set: { on in
+                    update { $0.hideWhenIdle = on }
+                    editor.save()
+                }))
+                .toggleStyle(.checkbox)
+                if style.hideWhenIdle {
+                    slider("after", value: style.idleSeconds, in: 0.5...6,
+                           format: { String(format: "%.1fs", $0) }) { value in update { $0.idleSeconds = value } }
+                }
+
+                Toggle("Hide while typing", isOn: Binding(get: { style.hideWhileTyping }, set: { on in
+                    update { $0.hideWhileTyping = on }
+                    editor.save()
+                }))
+                .toggleStyle(.checkbox)
+                .disabled(!editor.recordsKeyPresses)
+                .help(editor.recordsKeyPresses
+                    ? "Fade the cursor out while keys are pressed"
+                    : "No key presses were recorded in this recording")
             }
+        }
+    }
+
+    // MARK: Canvas
+
+    private var canvasControls: some View {
+        let style = editor.canvasStyle
+        func update(_ change: (inout CanvasStyle) -> Void) {
+            var updated = style
+            change(&updated)
+            editor.setCanvas(updated)
+        }
+        return HStack(spacing: 16) {
+            Toggle("Canvas", isOn: Binding(get: { style.isEnabled }, set: { on in
+                update { $0.isEnabled = on }
+                editor.save()
+            }))
             .toggleStyle(.switch)
             .controlSize(.small)
 
             if style.isEnabled {
-                Picker("", selection: Binding(
-                    get: { style.background },
-                    set: { background in
-                        var updated = style
-                        updated.background = background
-                        editor.setCanvas(updated)
-                        editor.save()
-                    }
-                )) {
+                Picker("", selection: Binding(get: { style.background }, set: { background in
+                    update { $0.background = background }
+                    editor.save()
+                })) {
                     ForEach(CanvasStyle.Background.allCases) { Text($0.label).tag($0) }
                 }
                 .labelsHidden()
                 .frame(width: 120)
 
                 slider("Padding", value: style.padding, in: 0...0.2,
-                       format: { String(format: "%.0f%%", $0 * 100) }) { value in
-                    var updated = style
-                    updated.padding = value
-                    editor.setCanvas(updated)
-                }
+                       format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.padding = value } }
                 slider("Corners", value: style.cornerRadius, in: 0...0.1,
-                       format: { String(format: "%.0f%%", $0 * 100) }) { value in
-                    var updated = style
-                    updated.cornerRadius = value
-                    editor.setCanvas(updated)
-                }
+                       format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.cornerRadius = value } }
                 slider("Shadow", value: style.shadow, in: 0...1,
-                       format: { String(format: "%.0f%%", $0 * 100) }) { value in
-                    var updated = style
-                    updated.shadow = value
-                    editor.setCanvas(updated)
-                }
+                       format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.shadow = value } }
+            } else {
+                Text("Float the recording as a rounded card on a gradient background.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        .frame(height: 44)
-        .background(Color.white.opacity(0.02))
     }
 
     private func slider(
@@ -310,26 +414,11 @@ private struct EditorContentView: View {
                 in: range,
                 onEditingChanged: { if !$0 { editor.save() } }
             )
-            .frame(width: 140)
+            .frame(width: 120)
             Text(format(value))
                 .font(.system(.callout, design: .monospaced))
                 .frame(width: 46, alignment: .leading)
         }
-    }
-
-    private var errorBinding: Binding<Bool> {
-        Binding(
-            get: { editor.errorMessage != nil },
-            set: { if !$0 { editor.errorMessage = nil } }
-        )
-    }
-
-    static func timecode(_ time: TimeInterval) -> String {
-        let total = max(0, time)
-        return String(format: "%02d:%02d.%02d",
-                      Int(total) / 60,
-                      Int(total) % 60,
-                      Int((total - total.rounded(.down)) * 100))
     }
 }
 

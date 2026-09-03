@@ -24,11 +24,8 @@ public struct ExportOptions: Sendable {
     /// aspect ratio than the capture is honored by aspect-filling: the camera
     /// viewport is cropped, centered on the camera, never stretched.
     public var size: CGSize?
-    public var drawsCursor: Bool
-    /// Cursor size relative to the recorded scale (1 = macOS default size).
-    public var cursorScale: Double
-    public var drawsClickRings: Bool
-    public var clickRingDuration: TimeInterval
+    /// How the recorded cursor is drawn back in.
+    public var cursor: CursorStyle
     /// Portion of the recording to export. `nil` exports all of it. Audio is
     /// kept and re-timed to the trimmed range.
     public var trim: ClosedRange<TimeInterval>?
@@ -42,10 +39,7 @@ public struct ExportOptions: Sendable {
 
     public init(
         size: CGSize? = nil,
-        drawsCursor: Bool = true,
-        cursorScale: Double = 1.4,
-        drawsClickRings: Bool = true,
-        clickRingDuration: TimeInterval = 0.45,
+        cursor: CursorStyle = .standard,
         trim: ClosedRange<TimeInterval>? = nil,
         codec: AVVideoCodecType = .h264,
         averageBitRate: Int? = nil,
@@ -54,10 +48,7 @@ public struct ExportOptions: Sendable {
     ) {
         self.trim = trim
         self.size = size
-        self.drawsCursor = drawsCursor
-        self.cursorScale = cursorScale
-        self.drawsClickRings = drawsClickRings
-        self.clickRingDuration = clickRingDuration
+        self.cursor = cursor
         self.codec = codec
         self.averageBitRate = averageBitRate
         self.frameRate = frameRate
@@ -190,9 +181,12 @@ public final class CinematicExporter {
         }
         writer.startSession(atSourceTime: .zero)
 
+        let shapes = bundle.readShapes()
         let renderer = CursorRenderer(
-            options: options,
+            style: options.cursor,
             track: track,
+            shapes: shapes,
+            shapeImages: CursorRenderer.loadShapeImages(for: shapes, in: bundle),
             scale: project.geometry.scale
         )
         let trimStart = trim?.lowerBound ?? 0
@@ -377,132 +371,4 @@ public final class CinematicExporter {
     }
 }
 
-/// Draws the cursor and click feedback into a frame, in source pixel space.
-/// Shared by the exporter and the editor's live preview, so what the user sees
-/// while scrubbing is what gets rendered.
-public struct CursorRenderer {
-    let options: ExportOptions
-    let track: CursorTrack
-    let scale: Double
-    private let clickTimes: [TimeInterval]
-    /// The arrow, rasterized once at the origin; each frame only translates it.
-    private let arrow: CIImage?
-
-    public init(options: ExportOptions, track: CursorTrack, scale: Double) {
-        self.options = options
-        self.track = track
-        self.scale = scale
-        self.clickTimes = track.events.filter { $0.type.isClickDown }.map(\.time)
-        self.arrow = CursorRenderer.rasterizeArrow(size: 24.0 * scale * options.cursorScale)
-    }
-
-    /// Cursor coordinates are normalized to the whole capture, so the overlay
-    /// is placed in full-frame pixel space and the caller crops afterwards.
-    public func draw(on image: CIImage, fullExtent: CGRect, time: TimeInterval) -> CIImage {
-        guard options.drawsCursor, let position = track.position(at: time) else { return image }
-        // CoreImage's origin is bottom-left; the track's is top-left.
-        let pixelX = fullExtent.origin.x + position.x * fullExtent.width
-        let pixelY = fullExtent.origin.y + (1 - position.y) * fullExtent.height
-        let cursorSize = 24.0 * scale * options.cursorScale
-        var overlay: CIImage?
-
-        if options.drawsClickRings,
-           let ringImage = ringImage(at: time, center: CGPoint(x: pixelX, y: pixelY), size: cursorSize) {
-            overlay = ringImage
-        }
-        if let cursorImage = arrowImage(center: CGPoint(x: pixelX, y: pixelY), size: cursorSize) {
-            overlay = overlay.map { cursorImage.composited(over: $0) } ?? cursorImage
-        }
-        guard let overlay else { return image }
-        return overlay.composited(over: image)
-    }
-
-    private func ringImage(at time: TimeInterval, center: CGPoint, size: Double) -> CIImage? {
-        guard let click = clickTimes.last(where: { $0 <= time && time - $0 <= options.clickRingDuration })
-        else { return nil }
-        let progress = (time - click) / options.clickRingDuration
-        let radius = size * (0.6 + 1.4 * progress)
-        let alpha = 1 - progress
-        return CursorRenderer.drawing(size: CGSize(width: radius * 2 + 8, height: radius * 2 + 8), origin: CGPoint(
-            x: center.x - radius - 4,
-            y: center.y - radius - 4
-        )) { context in
-            context.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: alpha))
-            context.setLineWidth(max(2, size * 0.08))
-            context.strokeEllipse(in: CGRect(
-                x: 4,
-                y: 4,
-                width: radius * 2,
-                height: radius * 2
-            ))
-        }
-    }
-
-    private func arrowImage(center: CGPoint, size: Double) -> CIImage? {
-        let padding = size * 0.2
-        let height = size + padding * 2
-        // Places the tip exactly on the recorded cursor position.
-        return arrow?.transformed(by: CGAffineTransform(
-            translationX: center.x - padding,
-            y: center.y - height + padding
-        ))
-    }
-
-    private static func rasterizeArrow(size: Double) -> CIImage? {
-        // Arrow outline in a unit box with the hotspot (the tip) at (0, 0) and
-        // y growing downwards, the way a cursor is normally described.
-        let points: [CGPoint] = [
-            CGPoint(x: 0.00, y: 0.00), CGPoint(x: 0.00, y: 0.78), CGPoint(x: 0.22, y: 0.60),
-            CGPoint(x: 0.36, y: 0.95), CGPoint(x: 0.52, y: 0.88), CGPoint(x: 0.38, y: 0.54),
-            CGPoint(x: 0.64, y: 0.54)
-        ]
-        let padding = size * 0.2
-        let height = size + padding * 2
-        return drawing(
-            size: CGSize(width: size + padding * 2, height: height),
-            origin: .zero
-        ) { context in
-            context.setShadow(offset: CGSize(width: 0, height: -size * 0.05), blur: size * 0.12)
-            let path = CGMutablePath()
-            for (index, point) in points.enumerated() {
-                let converted = CGPoint(
-                    x: padding + point.x * size,
-                    y: height - padding - point.y * size
-                )
-                if index == 0 { path.move(to: converted) } else { path.addLine(to: converted) }
-            }
-            path.closeSubpath()
-            context.addPath(path)
-            context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-            context.fillPath()
-            context.addPath(path)
-            context.setStrokeColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
-            context.setLineWidth(max(1, size * 0.05))
-            context.strokePath()
-        }
-    }
-
-    private static func drawing(
-        size: CGSize,
-        origin: CGPoint,
-        _ body: (CGContext) -> Void
-    ) -> CIImage? {
-        let width = Int(size.width.rounded(.up))
-        let height = Int(size.height.rounded(.up))
-        guard width > 0, height > 0,
-              let context = CGContext(
-                data: nil,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: 0,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-              ) else { return nil }
-        body(context)
-        guard let cgImage = context.makeImage() else { return nil }
-        return CIImage(cgImage: cgImage)
-            .transformed(by: CGAffineTransform(translationX: origin.x, y: origin.y))
-    }
-}
 #endif

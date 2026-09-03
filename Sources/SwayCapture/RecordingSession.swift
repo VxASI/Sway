@@ -9,17 +9,20 @@ public struct RecordingResult {
     public let bundle: SwayProjectBundle
     public let project: SwayProject
     public let track: CursorTrack
+    public let shapes: CursorShapeTrack
     public let edit: SwayEdit
 
     public init(
         bundle: SwayProjectBundle,
         project: SwayProject,
         track: CursorTrack,
+        shapes: CursorShapeTrack = CursorShapeTrack(),
         edit: SwayEdit
     ) {
         self.bundle = bundle
         self.project = project
         self.track = track
+        self.shapes = shapes
         self.edit = edit
     }
 }
@@ -36,6 +39,7 @@ public final class RecordingSession {
     private var bridge: HostClockBridge?
     private var recorder: ScreenRecorder?
     private var tracker: GlobalCursorTracker?
+    private var shapeRecorder: CursorShapeRecorder?
 
     public init(
         bundleURL: URL,
@@ -71,6 +75,12 @@ public final class RecordingSession {
             throw error
         }
         self.tracker = tracker
+
+        // Pointer shapes are best-effort: a host that reports none just
+        // gets the arrow at render time.
+        let shapeRecorder = CursorShapeRecorder(bridge: bridge)
+        shapeRecorder.start()
+        self.shapeRecorder = shapeRecorder
     }
 
     /// Seconds since capture started, for the recording control's timer.
@@ -87,6 +97,7 @@ public final class RecordingSession {
             throw ScreenRecordingError.notRecording
         }
         tracker.stop()
+        shapeRecorder?.stop()
         let duration = try await recorder.stop()
 
         // Cursor events are stamped in timebase seconds; the movie starts at
@@ -102,6 +113,7 @@ public final class RecordingSession {
             }
             .filter { $0.time >= 0 && (duration <= 0 || $0.time <= duration) }
 
+        let shapes = shapeRecorder?.track().rebased(by: offset) ?? CursorShapeTrack()
         let edit = SwayEdit.initial(duration: duration, track: track)
         let camera = cameraGenerator.generate(track: track, duration: duration, segments: edit.segments)
         let geometry = recorder.geometry ?? CaptureGeometry(
@@ -116,11 +128,16 @@ public final class RecordingSession {
         )
         try bundle.write(project: project, track: track, camera: camera)
         try bundle.write(edit: edit)
+        if !shapes.isEmpty {
+            try shapeRecorder?.writePNGs(to: bundle.cursorsDirectoryURL)
+            try bundle.write(shapes: shapes)
+        }
 
         self.recorder = nil
         self.tracker = nil
+        self.shapeRecorder = nil
         self.bridge = nil
-        return RecordingResult(bundle: bundle, project: project, track: track, edit: edit)
+        return RecordingResult(bundle: bundle, project: project, track: track, shapes: shapes, edit: edit)
     }
 }
 #endif

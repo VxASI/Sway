@@ -299,7 +299,10 @@ final class AppModel: ObservableObject {
             let edit = (try? bundle.readEdit())
                 ?? SwayEdit.initial(duration: project.duration, track: track)
             editor = EditorModel(
-                result: RecordingResult(bundle: bundle, project: project, track: track, edit: edit)
+                result: RecordingResult(
+                    bundle: bundle, project: project, track: track,
+                    shapes: bundle.readShapes(), edit: edit
+                )
             )
             phase = .editing
         } catch {

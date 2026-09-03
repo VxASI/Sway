@@ -41,8 +41,15 @@ out. Near a frame edge the camera clamps and lets the cursor drift off-center
 rather than pushing past the edge.
 
 **Cursor is drawn at export.** `showsCursor` is false during capture, so the
-exporter can draw a larger, smoothed cursor with a shadow and click rings from
-the recorded events.
+cursor is a post-recording choice: size, path smoothing, click rings and their
+color, a spotlight that dims everything but the pointer, fading out when idle
+or while typing, and the pointer *shape*. Shapes are captured during recording
+by sampling `NSCursor.currentSystem` at 15 Hz: each distinct image is stored
+once as a PNG in `cursors/`, and `shapes.json` records when the pointer switched
+(arrow, I-beam, hand, resize...). Key presses are recorded as timestamps only -
+never which key - so the editor can hide the cursor during typing. All of it is
+in the **Cursor** tab of the editor and renders identically in preview and
+export.
 
 **Effects are edits, not detections.** The editor's camera is driven by
 non-overlapping effect segments on the timeline. Outside them the camera sits
@@ -119,8 +126,10 @@ swift build -c release
 
 - **Screen Recording** - ScreenCaptureKit, for both the picker's window list and
   the capture itself.
-- **Input Monitoring** - the listen-only `CGEventTap` that records the cursor;
-  without it recording fails with a `CGEventTap` error.
+- **Input Monitoring** - the listen-only `CGEventTap` that records the cursor
+  and key-press moments; without it recording fails with a `CGEventTap` error.
+  If the system only allows a mouse-only tap, recording proceeds without the
+  typing information.
 
 Three properties of these APIs shape the whole permission flow, and all three
 present as a hang if they are ignored:
@@ -163,7 +172,9 @@ demo.sway/
   screen.mov     H.264 + system audio, no cursor
   cursor.json    every cursor event, normalized, video-relative seconds
   camera.json    generated camera keyframes (center + zoom over time)
-  edit.json      trim points and the effect segments the camera was generated from
+  edit.json      trim, effect segments, canvas and cursor styles
+  shapes.json    pointer shape timeline (when captured)
+  cursors/       one PNG per distinct pointer image seen while recording
 ```
 
 `edit.json` segments look like (`kind` is `zoom` or `followCursor`; older files
@@ -202,12 +213,11 @@ segments baked in, progress, trimmed audio, aspect presets, frame-rate cap.
 - Microphone and camera tracks (system audio only).
 - Pause/resume during recording (ScreenCaptureKit has no pause; it needs
   timestamp re-basing across both the movie and the cursor track).
-- Auto-hiding the cursor while typing (needs keyboard events in the tap).
 - Region capture is passed to `SCStreamConfiguration.sourceRect`, which requires
   macOS 14; on macOS 13 the full display is captured.
 - Webcam card and captions (the canvas leaves room for both; the webcam needs a
   camera track and permission, captions need transcription).
 - Auto-focus on the active window / selected element (needs the accessibility
   tree, not just the event tap).
-- Cursor highlights beyond click rings, scene transitions. The segment model
-  (`EffectSegment.kind`) is where these slot in.
+- Scene transitions. The segment model (`EffectSegment.kind`) is where these
+  slot in.

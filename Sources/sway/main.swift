@@ -96,7 +96,7 @@ case "export":
     let exportBundle = SwayProjectBundle(url: URL(fileURLWithPath: arguments[1]))
     let destination = URL(fileURLWithPath: arguments[2])
     var exportOptions = ExportOptions()
-    if arguments.contains("--no-cursor") { exportOptions.drawsCursor = false }
+    if arguments.contains("--no-cursor") { exportOptions.cursor.isVisible = false }
     if arguments.contains("--canvas") { exportOptions.canvas = .clean }
     if let width = value(for: "--width").flatMap(Double.init) {
         let aspect = (try? exportBundle.readProject())?.geometry.aspectRatio ?? (16.0 / 9)
