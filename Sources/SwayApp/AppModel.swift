@@ -50,6 +50,7 @@ final class AppModel: ObservableObject {
     private var countdownTask: Task<Void, Never>?
     private var timer: AnyCancellable?
     private var hotKey: StopHotKey?
+    private var sourceTask: Task<Void, Never>?
     private var thumbnailTask: Task<Void, Never>?
     private var libraryTask: Task<Void, Never>?
     private var permissionsObserver: AnyCancellable?
@@ -115,30 +116,39 @@ final class AppModel: ObservableObject {
     // MARK: - Picking
 
     func cancelPicking() {
+        sourceTask?.cancel()
         thumbnailTask?.cancel()
+        isLoadingSources = false
         phase = editor == nil ? .idle : .editing
     }
 
     func reloadSources() {
         isLoadingSources = true
         sourcesError = nil
+        sourceTask?.cancel()
         thumbnailTask?.cancel()
-        Task {
+        sourceTask = Task {
             do {
                 await catalog.invalidate()
+                try Task.checkCancellation()
                 let loaded = try await catalog.sources(
                     excludingBundleIdentifiers: [AppModel.bundleIdentifier]
                 )
+                try Task.checkCancellation()
                 self.sources = loaded
                 if self.selectedSource == nil {
                     self.selectedSourceID = loaded.first?.id
                 }
                 self.loadThumbnails(for: loaded)
-            } catch CaptureSourceError.screenRecordingPermissionMissing {
-                self.showPermissions()
             } catch {
-                self.sourcesError = "\(error)"
+                guard !Task.isCancelled else { return }
+                if case CaptureSourceError.screenRecordingPermissionMissing = error {
+                    self.showPermissions()
+                } else {
+                    self.sourcesError = "\(error)"
+                }
             }
+            guard !Task.isCancelled else { return }
             self.isLoadingSources = false
         }
     }
@@ -152,6 +162,7 @@ final class AppModel: ObservableObject {
             for source in sources {
                 if Task.isCancelled { return }
                 if let image = await catalog.thumbnail(for: source.target) {
+                    guard !Task.isCancelled else { return }
                     self.thumbnails[source.id] = image
                 }
             }
@@ -164,7 +175,10 @@ final class AppModel: ObservableObject {
     /// get their screen ready. The countdown floats over everything and can be
     /// cancelled; capture only starts when it finishes.
     func startRecording() {
-        guard selectedSource != nil else { return }
+        guard phase == .picking, selectedSource != nil else { return }
+        sourceTask?.cancel()
+        thumbnailTask?.cancel()
+        isLoadingSources = false
         phase = .countdown
         mainWindow?.orderOut(nil)
 
