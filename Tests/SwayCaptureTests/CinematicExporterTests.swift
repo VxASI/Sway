@@ -218,11 +218,20 @@ final class CinematicExporterTests: XCTestCase {
         let tracks = try await asset.loadTracks(withMediaType: .video)
         let track = try XCTUnwrap(tracks.first)
         let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
         reader.add(output)
-        reader.startReading()
+        guard reader.startReading() else {
+            throw ExportError.readerSetupFailed(reader.error?.localizedDescription ?? "test reader failed")
+        }
         var count = 0
-        while output.copyNextSampleBuffer() != nil { count += 1 }
+        while let sample = output.copyNextSampleBuffer() {
+            // AVFoundation can emit marker buffers containing no media.
+            // Count decoded images, not compressed stream bookkeeping.
+            if CMSampleBufferGetImageBuffer(sample) != nil { count += 1 }
+        }
+        XCTAssertEqual(reader.status, .completed)
         return count
     }
 
