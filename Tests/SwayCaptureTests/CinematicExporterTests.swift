@@ -150,7 +150,7 @@ final class CinematicExporterTests: XCTestCase {
             ExportOptions(trim: 2...2),
             ExportOptions(trim: -1...2),
             ExportOptions(trim: 0...5),
-            ExportOptions(size: CGSize(width: .infinity, height: 360)),
+            ExportOptions(size: CGSize(width: CGFloat.infinity, height: 360)),
             ExportOptions(size: CGSize(width: 640.5, height: 360)),
             ExportOptions(averageBitRate: 0)
         ]
