@@ -90,6 +90,9 @@ final class AppModel: ObservableObject {
     /// a possibly-unresponsive TCC daemon first only adds a way to get stuck
     /// before anything useful has happened.
     func showPicker() {
+        guard editor?.isExporting != true else { return }
+        editor?.commitProjectName()
+        editor?.save()
         log.info("record tapped")
         editor?.pause()
         phase = .picking
@@ -329,6 +332,8 @@ final class AppModel: ObservableObject {
 
     /// Back to the welcome screen, which doubles as the recordings library.
     func showLibrary() {
+        guard editor?.isExporting != true else { return }
+        editor?.commitProjectName()
         editor?.pause()
         editor = nil
         phase = .idle

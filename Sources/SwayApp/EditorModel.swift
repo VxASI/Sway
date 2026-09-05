@@ -73,6 +73,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var isExporting = false
     @Published private(set) var exportProgress: Double = 0
     @Published var exportedURL: URL?
+    @Published private(set) var exportError: String?
+    @Published var exportSettings = ExportSettings()
     @Published var errorMessage: String?
 
     private let generator = CameraPathGenerator()
@@ -388,6 +390,8 @@ final class EditorModel: ObservableObject {
                 ?? bundle.url.deletingPathExtension().lastPathComponent
             return
         }
+        projectName = trimmed
+        guard project.name != trimmed else { return }
         project.name = trimmed
         do {
             try bundle.write(project: project)
@@ -417,6 +421,8 @@ final class EditorModel: ObservableObject {
     // MARK: - Export
 
     func export(settings: ExportSettings) {
+        guard !isExporting else { return }
+        commitProjectName()
         let panel = NSSavePanel()
         panel.nameFieldStringValue = projectName + ".mp4"
         panel.allowedContentTypes = [.mpeg4Movie]
@@ -425,6 +431,8 @@ final class EditorModel: ObservableObject {
         save()
         pause()
         isExporting = true
+        exportedURL = nil
+        exportError = nil
         exportProgress = 0
 
         let outputSize = settings.sizePreset.size ?? CGSize(
@@ -449,10 +457,15 @@ final class EditorModel: ObservableObject {
                 }
                 self.exportedURL = destination
             } catch {
-                self.errorMessage = "Export failed.\n\n\(error)"
+                self.exportError = "Export failed.\n\n\(error)"
             }
             self.isExporting = false
         }
+    }
+
+    func openExportedFile() {
+        guard let exportedURL else { return }
+        NSWorkspace.shared.open(exportedURL)
     }
 
     func revealExportedFile() {
