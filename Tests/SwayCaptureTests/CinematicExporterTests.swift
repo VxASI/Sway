@@ -133,7 +133,82 @@ final class CinematicExporterTests: XCTestCase {
 
         let cappedCount = try await frameCount(of: capped)
         let fullCount = try await frameCount(of: full)
-        XCTAssertLessThan(cappedCount, fullCount)
+        XCTAssertEqual(cappedCount, 60, "four seconds at 15 fps has no extra boundary frame")
+        XCTAssertEqual(fullCount, 240, "four seconds at 60 fps has no extra boundary frame")
+    }
+
+    func testInvalidOptionsPreserveExistingExport() async throws {
+        let output = bundleURL.appendingPathExtension("mp4")
+        let original = Data("previous export".utf8)
+        try original.write(to: output)
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        let invalidOptions = [
+            ExportOptions(frameRate: 0),
+            ExportOptions(frameRate: -1),
+            ExportOptions(frameRate: 241),
+            ExportOptions(trim: 2...2),
+            ExportOptions(trim: -1...2),
+            ExportOptions(trim: 0...5),
+            ExportOptions(size: CGSize(width: CGFloat.infinity, height: 360)),
+            ExportOptions(size: CGSize(width: 640.5, height: 360)),
+            ExportOptions(averageBitRate: 0)
+        ]
+        for options in invalidOptions {
+            do {
+                try await CinematicExporter(bundle: bundle, options: options).export(to: output)
+                XCTFail("Invalid options should fail before rendering")
+            } catch ExportError.invalidOptions {
+                // Expected: a useful error, without touching the destination.
+            }
+            XCTAssertEqual(try Data(contentsOf: output), original)
+        }
+    }
+
+    func testExportCannotOverwriteSourceBundleOrFilesThroughSymlink() async throws {
+        let original = try Data(contentsOf: bundle.videoURL)
+        let alias = bundleURL.appendingPathExtension("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: bundleURL)
+        defer { try? FileManager.default.removeItem(at: alias) }
+
+        for output in [bundleURL!, bundle.videoURL, bundle.projectURL,
+                       alias.appendingPathComponent(SwayProjectBundle.videoFileName)] {
+            do {
+                try await CinematicExporter(bundle: bundle).export(to: output)
+                XCTFail("Export must not replace its own source")
+            } catch ExportError.invalidDestination {
+                // Expected, even for aliases into the source bundle.
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: bundle.videoURL), original)
+        XCTAssertEqual(try bundle.readProject().duration, duration)
+    }
+
+    func testSuccessfulExportReplacesExistingDestinationAndCleansStagingFile() async throws {
+        let directory = bundleURL.appendingPathExtension("exports")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("finished.mp4")
+        try Data("old movie".utf8).write(to: output)
+
+        try await CinematicExporter(bundle: bundle, options: ExportOptions(frameRate: 15))
+            .export(to: output)
+
+        let count = try await frameCount(of: output)
+        XCTAssertEqual(count, 60)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["finished.mp4"])
+    }
+
+    func testNonFrameAlignedTrimHasExactFrameCount() async throws {
+        let output = bundleURL.appendingPathExtension("mp4")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try await CinematicExporter(
+            bundle: bundle, options: ExportOptions(trim: 0.11...1.12, frameRate: 30)
+        ).export(to: output)
+        let count = try await frameCount(of: output)
+        XCTAssertEqual(count, 31)
+        let exportedDuration = try await AVURLAsset(url: output).load(.duration).seconds
+        XCTAssertEqual(exportedDuration, 1.01, accuracy: 0.02)
     }
 
     // MARK: - Helpers
@@ -143,11 +218,20 @@ final class CinematicExporterTests: XCTestCase {
         let tracks = try await asset.loadTracks(withMediaType: .video)
         let track = try XCTUnwrap(tracks.first)
         let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
         reader.add(output)
-        reader.startReading()
+        guard reader.startReading() else {
+            throw ExportError.readerSetupFailed(reader.error?.localizedDescription ?? "test reader failed")
+        }
         var count = 0
-        while output.copyNextSampleBuffer() != nil { count += 1 }
+        while let sample = output.copyNextSampleBuffer() {
+            // AVFoundation can emit marker buffers containing no media.
+            // Count decoded images, not compressed stream bookkeeping.
+            if CMSampleBufferGetImageBuffer(sample) != nil { count += 1 }
+        }
+        XCTAssertEqual(reader.status, .completed)
         return count
     }
 

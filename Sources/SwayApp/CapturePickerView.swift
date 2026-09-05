@@ -6,12 +6,27 @@ import SwiftUI
 /// thumbnail, its name, and a clear selected state.
 struct CapturePickerView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var searchText = ""
+
+    private var filteredSources: [CaptureSource] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return model.sources }
+        return model.sources.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || $0.subtitle.localizedCaseInsensitiveContains(query)
+        }
+    }
 
     private let columns = [GridItem(.adaptive(minimum: 220, maximum: 320), spacing: 18)]
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            TextField("Find a screen, window or app", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+                .accessibilityLabel("Search capture sources")
             Divider()
             if let error = model.sourcesError {
                 failure(error)
@@ -32,11 +47,20 @@ struct CapturePickerView: View {
                 Screen Recording, quit and reopen Sway - the grant only applies \
                 to a fresh launch.
                 """)
+            } else if filteredSources.isEmpty {
+                VStack(spacing: 12) {
+                    Text("No matching screens or windows")
+                        .font(.headline)
+                    Text("Try a window title or app name.")
+                        .foregroundStyle(.secondary)
+                    Button("Clear Search") { searchText = "" }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
-                        section("Screens", sources: model.sources.filter { $0.kind == .display })
-                        section("Windows", sources: model.sources.filter { $0.kind == .window })
+                        section("Screens", sources: filteredSources.filter { $0.kind == .display })
+                        section("Windows", sources: filteredSources.filter { $0.kind == .window })
                     }
                     .padding(20)
                 }
@@ -51,6 +75,9 @@ struct CapturePickerView: View {
             Text("Choose what to record")
                 .font(.title2.weight(.semibold))
             Spacer()
+            if model.isLoadingSources {
+                ProgressView().controlSize(.small)
+            }
             Button {
                 model.reloadSources()
             } label: {
@@ -63,31 +90,42 @@ struct CapturePickerView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 18) {
-            Button("Cancel") { model.cancelPicking() }
-                .keyboardShortcut(.cancelAction)
-
-            Spacer()
-
-            Picker("Frame rate", selection: $model.recordingFrameRate) {
-                Text("30 fps").tag(30)
-                Text("60 fps").tag(60)
+        VStack(alignment: .leading, spacing: 12) {
+            if let source = model.selectedSource {
+                HStack {
+                    Text("Selected: \(source.name)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text("Starts after a 3-second countdown")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
             }
-            .pickerStyle(.segmented)
-            .frame(width: 150)
-            .labelsHidden()
-            .help("Capture frame rate")
+            HStack(spacing: 18) {
+                Button("Cancel") { model.cancelPicking() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Picker("Frame rate", selection: $model.recordingFrameRate) {
+                    Text("30 fps").tag(30)
+                    Text("60 fps").tag(60)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 150)
+                .labelsHidden()
+                .help("Capture frame rate")
 
-            Toggle(isOn: $model.capturesSystemAudio) {
-                Label("System Audio", systemImage: "speaker.wave.2")
+                Toggle(isOn: $model.capturesSystemAudio) {
+                    Label("System Audio", systemImage: "speaker.wave.2")
+                }
+                .toggleStyle(.checkbox)
+                .help("Record the Mac's audio output alongside the screen")
+
+                Button("Start Recording") { model.startRecording() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.selectedSource == nil)
             }
-            .toggleStyle(.checkbox)
-            .help("Record the Mac's audio output alongside the screen")
-
-            Button("Start Recording") { model.startRecording() }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .disabled(model.selectedSource == nil)
         }
         .padding(20)
     }
@@ -121,12 +159,19 @@ struct CapturePickerView: View {
                     .foregroundStyle(.secondary)
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
                     ForEach(sources) { source in
-                        CaptureSourceTile(
-                            source: source,
-                            thumbnail: model.thumbnails[source.id],
-                            isSelected: model.selectedSourceID == source.id
-                        )
-                        .onTapGesture { model.selectedSourceID = source.id }
+                        Button {
+                            model.selectedSourceID = source.id
+                        } label: {
+                            CaptureSourceTile(
+                                source: source,
+                                thumbnail: model.thumbnails[source.id],
+                                isSelected: model.selectedSourceID == source.id
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(source.name), \(source.subtitle)")
+                        .accessibilityValue(model.selectedSourceID == source.id ? "Selected" : "Not selected")
+                        .help("Select \(source.name)")
                     }
                 }
             }

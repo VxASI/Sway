@@ -21,6 +21,7 @@ private struct EditorContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var timelineScale: CGFloat = 1
     @State private var smartFocusZoom: Double = 1.8
+    @FocusState private var isProjectNameFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +62,10 @@ private struct EditorContentView: View {
             .buttonStyle(.borderless)
 
             TextField("Project name", text: $editor.projectName)
+                .focused($isProjectNameFocused)
+                .onChange(of: isProjectNameFocused) { focused in
+                    if !focused { editor.commitProjectName() }
+                }
                 .textFieldStyle(.plain)
                 .font(.headline)
                 .frame(maxWidth: 280)
@@ -114,9 +119,11 @@ private struct EditorContentView: View {
             .keyboardShortcut(.space, modifiers: [])
             .help(editor.isPlaying ? "Pause" : "Play")
 
-            Text(EditorContentView.timecode(editor.playhead))
+            Text(EditorContentView.timecode(
+                min(max(0, editor.playhead - editor.trimStart), editor.edit.trimmedDuration)
+            ))
                 .font(.system(.body, design: .monospaced))
-            Text("/ \(EditorContentView.timecode(editor.trimEnd))")
+            Text("/ \(EditorContentView.timecode(editor.edit.trimmedDuration))")
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
 
@@ -472,7 +479,6 @@ private struct FocalPointOverlay: View {
 /// what state the export is in.
 private struct ExportSheet: View {
     @ObservedObject var editor: EditorModel
-    @State private var settings = ExportSettings()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -489,38 +495,59 @@ private struct ExportSheet: View {
         }
         .padding(24)
         .frame(width: 380)
+        .interactiveDismissDisabled(editor.isExporting)
         .onDisappear { editor.exportedURL = nil }
     }
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Picker("Dimensions", selection: $settings.sizePreset) {
+            Picker("Dimensions", selection: $editor.exportSettings.sizePreset) {
                 ForEach(ExportSettings.SizePreset.allCases) { preset in
                     Text(preset.label).tag(preset)
                 }
             }
-            Picker("Quality", selection: $settings.quality) {
+            Picker("Quality", selection: $editor.exportSettings.quality) {
                 ForEach(ExportSettings.Quality.allCases) { quality in
                     Text(quality.label).tag(quality)
                 }
             }
             .pickerStyle(.segmented)
-            Picker("Frame rate", selection: $settings.frameRate) {
+            Picker("Frame rate", selection: $editor.exportSettings.frameRate) {
                 ForEach(ExportSettings.FrameRate.allCases) { rate in
                     Text(rate.label).tag(rate)
                 }
             }
             .pickerStyle(.segmented)
 
-            Text("MP4 · zooms, cursor and trim are baked in exactly as previewed.")
+            let size = editor.exportSettings.sizePreset.size ?? CGSize(
+                width: editor.project.geometry.pixelWidth,
+                height: editor.project.geometry.pixelHeight
+            )
+            Text("\(EditorContentView.timecode(editor.edit.trimmedDuration)) · \(Int(size.width)) × \(Int(size.height)) · MP4")
+                .font(.callout.monospacedDigit())
+            Text("Includes your camera effects, cursor and trim. Changing the aspect ratio crops the video to fit.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if let error = editor.exportError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Could not export", systemImage: "exclamationmark.triangle")
+                        .font(.callout.weight(.semibold))
+                    Text(error).font(.caption).textSelection(.enabled)
+                    Text("Your recording is unchanged. Retry or choose another location.")
+                        .font(.caption)
+                }
+                .foregroundStyle(.orange)
+                .accessibilityElement(children: .combine)
+            }
 
             HStack {
                 Button("Cancel") { editor.isExportSheetPresented = false }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Export…") { editor.export(settings: settings) }
+                Button(editor.exportError == nil ? "Export…" : "Retry Export…") {
+                    editor.export(settings: editor.exportSettings)
+                }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
             }
@@ -530,7 +557,9 @@ private struct ExportSheet: View {
     private var exporting: some View {
         VStack(alignment: .leading, spacing: 10) {
             ProgressView(value: editor.exportProgress)
-            Text("Rendering… \(Int(editor.exportProgress * 100))%")
+            Text(editor.exportProgress >= 0.98
+                 ? "Finishing your video…"
+                 : "Rendering… \(Int(editor.exportProgress * 100))%")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -548,7 +577,8 @@ private struct ExportSheet: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             HStack {
-                Button("Reveal in Finder") { editor.revealExportedFile() }
+                Button("Open Video") { editor.openExportedFile() }
+                Button("Show in Finder") { editor.revealExportedFile() }
                 Spacer()
                 Button("Done") {
                     editor.exportedURL = nil

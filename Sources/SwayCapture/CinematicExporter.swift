@@ -7,12 +7,16 @@ import SwayCore
 
 public enum ExportError: Error, CustomStringConvertible {
     case noVideoTrack
+    case invalidOptions(String)
+    case invalidDestination
     case readerSetupFailed(String)
     case writerSetupFailed(String)
 
     public var description: String {
         switch self {
         case .noVideoTrack: return "The recording has no video track."
+        case .invalidOptions(let reason): return "Invalid export settings: \(reason)"
+        case .invalidDestination: return "Choose an export location outside the source recording bundle."
         case .readerSetupFailed(let reason): return "Could not read the recording: \(reason)"
         case .writerSetupFailed(let reason): return "Could not write the export: \(reason)"
         }
@@ -81,16 +85,37 @@ public final class CinematicExporter {
         to outputURL: URL,
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
+        // Never let an export replace the bundle or any of its source files,
+        // including when the destination reaches them through a symbolic link.
+        let sourcePath = bundle.url.resolvingSymlinksInPath().standardizedFileURL.path
+        let destinationPath = outputURL.resolvingSymlinksInPath().standardizedFileURL.path
+        guard destinationPath != sourcePath,
+              !destinationPath.hasPrefix(sourcePath + "/") else {
+            throw ExportError.invalidDestination
+        }
         let project = try bundle.readProject()
+        let frameRate = options.frameRate ?? 60
+        guard (1...240).contains(frameRate) else {
+            throw ExportError.invalidOptions("frame rate must be between 1 and 240 fps")
+        }
+        guard project.duration.isFinite, project.duration > 0 else {
+            throw ExportError.invalidOptions("recording duration must be finite and positive")
+        }
+        if let bitRate = options.averageBitRate, bitRate <= 0 {
+            throw ExportError.invalidOptions("video bit rate must be positive")
+        }
         let track = try bundle.readCursorTrack()
         let camera = overrideCamera
             ?? (try? bundle.readCameraPath())
             ?? CameraPathGenerator().generate(track: track, duration: project.duration)
         let trim = options.trim
-        let exportedDuration = max(
-            0.001,
-            (trim?.upperBound ?? project.duration) - (trim?.lowerBound ?? 0)
-        )
+        let trimStart = trim?.lowerBound ?? 0
+        let outputEnd = trim?.upperBound ?? project.duration
+        guard trimStart.isFinite, outputEnd.isFinite,
+              trimStart >= 0, outputEnd <= project.duration, outputEnd > trimStart else {
+            throw ExportError.invalidOptions("trim must be a nonempty range inside the recording")
+        }
+        let exportedDuration = outputEnd - trimStart
 
         let asset = AVURLAsset(url: bundle.videoURL)
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
@@ -99,6 +124,11 @@ public final class CinematicExporter {
         let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
         let sourceSize = try await videoTrack.load(.naturalSize)
         let outputSize = options.size ?? sourceSize
+        guard [outputSize.width, outputSize.height].allSatisfy({
+            $0.isFinite && $0 >= 2 && $0 <= 16_384 && $0.rounded(.down) == $0
+        }) else {
+            throw ExportError.invalidOptions("output dimensions must be whole pixels between 2 and 16384")
+        }
 
         let reader = try AVAssetReader(asset: asset)
         if let trim {
@@ -130,8 +160,16 @@ public final class CinematicExporter {
             }
         }
 
-        try? FileManager.default.removeItem(at: outputURL)
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        // Stage beside the destination so a failed render leaves any existing
+        // export intact. Publish only after the writer completes successfully.
+        let stagedURL = outputURL.deletingLastPathComponent()
+            .appendingPathComponent(".sway-export-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: stagedURL) }
+        let writer = try AVAssetWriter(outputURL: stagedURL, fileType: .mp4)
+        defer {
+            if reader.status == .reading { reader.cancelReading() }
+            if writer.status == .writing { writer.cancelWriting() }
+        }
         var videoSettings: [String: Any] = [
             AVVideoCodecKey: options.codec,
             AVVideoWidthKey: Int(outputSize.width),
@@ -189,7 +227,6 @@ public final class CinematicExporter {
             shapeImages: CursorRenderer.loadShapeImages(for: shapes, in: bundle),
             scale: project.geometry.scale
         )
-        let trimStart = trim?.lowerBound ?? 0
 
         // Both tracks are pumped at the same time. AVAssetWriter interleaves
         // its inputs and stops accepting video once it gets too far ahead of
@@ -210,10 +247,9 @@ public final class CinematicExporter {
             // frames would make the camera moves and the drawn cursor stutter
             // at that rate, so the output clock ticks at a fixed rate and the
             // most recent source frame is held between changes.
-            let outputStep = 1.0 / Double(options.frameRate ?? 60)
-            let outputEnd = trim?.upperBound ?? project.duration
+            let outputStep = 1.0 / Double(frameRate)
             var finished = false
-            var outputTime = trimStart
+            var frameIndex: Int64 = 0
             var current: CVPixelBuffer?
             var pending = videoOutput.copyNextSampleBuffer()
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -225,6 +261,11 @@ public final class CinematicExporter {
                 }
                 videoInput.requestMediaDataWhenReady(on: videoQueue) {
                     while videoInput.isReadyForMoreMediaData, !finished {
+                        // Derive ticks from an integer clock, avoiding drift
+                        // and an extra frame at the exclusive trim boundary.
+                        let relativeTime = Double(frameIndex) / Double(frameRate)
+                        guard relativeTime < exportedDuration else { return finish() }
+                        let outputTime = trimStart + relativeTime
                         // Advance the source to the newest frame at or before
                         // this output tick. The recorder starts the movie's
                         // timeline at the first captured frame, so asset time
@@ -240,7 +281,6 @@ public final class CinematicExporter {
                             current = CMSampleBufferGetImageBuffer(sample)
                         }
                         guard let source = current else { return finish() }
-                        if outputTime > outputEnd + outputStep / 2 { return finish() }
 
                         let state = camera.state(at: outputTime)
                             ?? CameraKeyframe(time: outputTime, centerX: 0.5, centerY: 0.5, zoom: 1)
@@ -255,13 +295,18 @@ public final class CinematicExporter {
                             adaptor.append(
                                 rendered,
                                 withPresentationTime: CMTime(
-                                    seconds: max(0, outputTime - trimStart),
-                                    preferredTimescale: 600
+                                    value: frameIndex,
+                                    timescale: CMTimeScale(frameRate)
                                 )
                             )
                             progress?(min(0.98, max(0, (outputTime - trimStart) / exportedDuration)))
                         }
-                        outputTime += outputStep
+                        frameIndex += 1
+                        // Do not wait for another readiness callback after
+                        // the last append; the writer may never send one.
+                        if Double(frameIndex) / Double(frameRate) >= exportedDuration {
+                            return finish()
+                        }
                     }
                 }
             }
@@ -298,9 +343,18 @@ public final class CinematicExporter {
         async let audio: Void = pumpAudio()
         _ = await (video, audio)
 
+        if reader.status == .failed {
+            throw ExportError.readerSetupFailed(reader.error?.localizedDescription ?? "decoding failed")
+        }
+        writer.endSession(atSourceTime: CMTime(seconds: exportedDuration, preferredTimescale: 60_000))
         await writer.finishWriting()
-        if writer.status == .failed, let error = writer.error {
-            throw error
+        guard writer.status == .completed else {
+            throw ExportError.writerSetupFailed(writer.error?.localizedDescription ?? "export did not complete")
+        }
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            _ = try FileManager.default.replaceItemAt(outputURL, withItemAt: stagedURL)
+        } else {
+            try FileManager.default.moveItem(at: stagedURL, to: outputURL)
         }
         progress?(1)
     }
