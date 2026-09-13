@@ -64,8 +64,6 @@ final class PreviewSource {
 }
 
 final class PreviewMetalView: MTKView, MTKViewDelegate {
-    override var isFlipped: Bool { true }
-
     private let source: PreviewSource
     private let renderer: MetalFrameRenderer?
     private var lastPixelBuffer: CVPixelBuffer?
