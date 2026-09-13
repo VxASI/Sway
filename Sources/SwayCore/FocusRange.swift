@@ -54,8 +54,8 @@ public struct FocusRange: Codable, Equatable, Sendable {
 public struct SwayEdit: Codable, Equatable, Sendable {
     public var trimStart: TimeInterval
     public var trimEnd: TimeInterval
-    /// User-authored effect segments, sorted and non-overlapping. Empty means
-    /// the whole recording plays at 1x.
+    /// User-authored effect segments, sorted and non-overlapping within each
+    /// effect kind. Empty means the whole recording plays at 1x.
     public var segments: [EffectSegment]
     /// How the recording is framed: full-bleed, or floating on a canvas.
     public var canvas: CanvasStyle

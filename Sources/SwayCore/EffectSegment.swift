@@ -9,7 +9,8 @@ public enum EffectKind: String, Codable, Sendable, CaseIterable {
 }
 
 /// One user-authored stretch of camera behavior on the timeline. Outside all
-/// segments the recording plays at 1x, dead center; segments never overlap.
+/// segments the recording plays at 1x, dead center; segments of the same kind
+/// never overlap, while zoom and follow-cursor segments can be stacked.
 ///
 /// This replaces the single `FocusRange` of the first editor. A `.zoom`
 /// segment holds a fixed focal point; a `.followCursor` segment lets the
@@ -79,10 +80,10 @@ public struct EffectSegment: Codable, Equatable, Sendable, Identifiable {
         return segment
     }
 
-    /// Sorts segments by start time and removes overlaps, trimming the later
-    /// segment against the earlier one and dropping any that collapse below
-    /// `minimumDuration`. The camera generator and timeline both assume this
-    /// invariant.
+    /// Sorts segments and removes overlaps within each effect lane, trimming
+    /// the later segment against the earlier one and dropping any that collapse
+    /// below `minimumDuration`. Different kinds may overlap so their camera
+    /// behaviors can be composed.
     public static func resolved(
         _ segments: [EffectSegment],
         duration: TimeInterval,
@@ -91,12 +92,12 @@ public struct EffectSegment: Codable, Equatable, Sendable, Identifiable {
         var result: [EffectSegment] = []
         for segment in segments.sorted(by: { $0.start < $1.start }) {
             var clamped = segment.clamped(to: duration, minimumDuration: minimumDuration)
-            if let previous = result.last, clamped.start < previous.end {
+            if let previous = result.last(where: { $0.kind == clamped.kind }), clamped.start < previous.end {
                 clamped.start = previous.end
             }
             guard clamped.end - clamped.start >= minimumDuration - 1e-9 else { continue }
             result.append(clamped)
         }
-        return result
+        return result.sorted { $0.start < $1.start }
     }
 }

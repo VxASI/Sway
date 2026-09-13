@@ -182,40 +182,32 @@ public struct CameraPathGenerator: Sendable {
         return generate(track: track, duration: duration, shots: shots)
     }
 
-    /// Camera path for the editor's effect segments: full frame outside them,
-    /// and inside each segment either a fixed zoom onto its focal point or a
-    /// cursor follow with its own smoothing. Segments must be sorted and
-    /// non-overlapping (`EffectSegment.resolved` guarantees this).
+    /// Camera path for the editor's effect segments. Zoom and follow-cursor
+    /// occupy independent lanes: when stacked, zoom supplies the framing scale
+    /// and follow-cursor supplies the moving center and smoothing.
     public func generate(
         track: CursorTrack,
         duration: TimeInterval,
         segments: [EffectSegment]
     ) -> CameraPath {
-        let shots = segments.map { segment -> CameraShot in
-            switch segment.kind {
-            case .zoom:
-                // Fully anchored: the frame composes around the chosen focal
-                // point and ignores the live cursor.
-                return CameraShot(
-                    start: segment.start,
-                    end: segment.end,
-                    zoom: max(1, segment.zoom),
-                    anchorX: segment.centerX,
-                    anchorY: segment.centerY,
-                    anchorWeight: 1
-                )
-            case .followCursor:
-                // smoothing 0...1 maps to a stiffer or softer center spring:
-                // 0 doubles the default stiffness, 1 halves it.
-                let scale = pow(2, (0.5 - segment.smoothing) * 2)
-                return CameraShot(
-                    start: segment.start,
-                    end: segment.end,
-                    zoom: max(1, segment.zoom),
-                    anchorWeight: 0,
-                    stiffnessScale: scale
-                )
-            }
+        let boundaries = Set(segments.flatMap { [$0.start, $0.end] }).sorted()
+        var shots: [CameraShot] = []
+        for (start, end) in zip(boundaries, boundaries.dropFirst()) where end > start {
+            let time = (start + end) / 2
+            let zoom = segments.first { $0.kind == .zoom && $0.contains(time) }
+            let follow = segments.first { $0.kind == .followCursor && $0.contains(time) }
+            guard let effect = zoom ?? follow else { continue }
+
+            let stiffnessScale = follow.map { pow(2, (0.5 - $0.smoothing) * 2) } ?? 1
+            shots.append(CameraShot(
+                start: start,
+                end: end,
+                zoom: max(1, zoom?.zoom ?? effect.zoom),
+                anchorX: follow == nil ? zoom?.centerX : nil,
+                anchorY: follow == nil ? zoom?.centerY : nil,
+                anchorWeight: follow == nil && zoom != nil ? 1 : 0,
+                stiffnessScale: stiffnessScale
+            ))
         }
         return generate(track: track, duration: duration, shots: shots)
     }

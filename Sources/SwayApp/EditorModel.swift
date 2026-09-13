@@ -216,7 +216,7 @@ final class EditorModel: ObservableObject {
     func addSegment(kind: EffectKind) {
         let length = max(1.0, min(4, duration * 0.3))
         let minimum = 0.25
-        guard let gap = firstFreeGap(from: playhead, minimum: minimum) else {
+        guard let gap = firstFreeGap(for: kind, from: playhead, minimum: minimum) else {
             errorMessage = "There is no room left on the timeline for another effect."
             return
         }
@@ -237,14 +237,11 @@ final class EditorModel: ObservableObject {
     /// gives way when the segment is squeezed against its minimum length.
     func updateSegment(_ segment: EffectSegment, movingEnd: Bool = true) {
         guard let index = edit.segments.firstIndex(where: { $0.id == segment.id }) else { return }
+        let lane = edit.segments.filter { $0.kind == segment.kind }.sorted { $0.start < $1.start }
+        guard let laneIndex = lane.firstIndex(where: { $0.id == segment.id }) else { return }
         var updated = segment.clamped(to: duration, movingEnd: movingEnd)
-        // Respect the neighbors: a segment cannot be dragged over another.
-        if index > 0 {
-            updated.start = max(updated.start, edit.segments[index - 1].end)
-        }
-        if index < edit.segments.count - 1 {
-            updated.end = min(updated.end, edit.segments[index + 1].start)
-        }
+        if laneIndex > 0 { updated.start = max(updated.start, lane[laneIndex - 1].end) }
+        if laneIndex < lane.count - 1 { updated.end = min(updated.end, lane[laneIndex + 1].start) }
         guard updated.duration >= 0.25 - 1e-9 else { return }
         edit.segments[index] = updated
         edit.segments.sort { $0.start < $1.start }
@@ -252,17 +249,21 @@ final class EditorModel: ObservableObject {
     }
 
     /// Slides a segment to a new start, keeping its length and stopping at
-    /// its neighbors and the recording's ends instead of shrinking it.
+    /// same-lane neighbors and the recording's ends instead of shrinking it.
     func moveSegment(id: UUID, toStart start: TimeInterval, duration length: TimeInterval) {
         guard let index = edit.segments.firstIndex(where: { $0.id == id }) else { return }
-        let lower = index > 0 ? edit.segments[index - 1].end : 0
-        let upper = index < edit.segments.count - 1 ? edit.segments[index + 1].start : duration
+        let current = edit.segments[index]
+        let lane = edit.segments.filter { $0.kind == current.kind }.sorted { $0.start < $1.start }
+        guard let laneIndex = lane.firstIndex(where: { $0.id == id }) else { return }
+        let lower = laneIndex > 0 ? lane[laneIndex - 1].end : 0
+        let upper = laneIndex < lane.count - 1 ? lane[laneIndex + 1].start : duration
         guard upper - lower >= length else { return }
-        var moved = edit.segments[index]
+        var moved = current
         moved.start = min(max(start, lower), upper - length)
         moved.end = moved.start + length
-        guard moved != edit.segments[index] else { return }
+        guard moved != current else { return }
         edit.segments[index] = moved
+        edit.segments.sort { $0.start < $1.start }
         regenerateCamera()
     }
 
@@ -274,13 +275,17 @@ final class EditorModel: ObservableObject {
     }
 
     private func firstFreeGap(
+        for kind: EffectKind,
         from time: TimeInterval,
         minimum: TimeInterval
     ) -> ClosedRange<TimeInterval>? {
         let lower = max(edit.trimStart, 0)
         let upper = min(edit.trimEnd, duration)
         var edges: [(start: TimeInterval, end: TimeInterval)] = [(lower, lower)]
-        edges += edit.segments.map { ($0.start, $0.end) }
+        edges += edit.segments
+            .filter { $0.kind == kind }
+            .sorted { $0.start < $1.start }
+            .map { ($0.start, $0.end) }
         edges.append((upper, upper))
 
         for index in 0..<(edges.count - 1) {
@@ -379,7 +384,7 @@ final class EditorModel: ObservableObject {
         var label: String { self == .clicks ? "Auto-focus on clicks" : "Auto-focus on cursor" }
     }
 
-    /// Replaces the segments with ones generated from the recording itself.
+    /// Replaces one effect lane with segments generated from the recording.
     /// `.clicks` produces zoom shots anchored on each group of interactions,
     /// framed slightly above center and held long enough to read; `.cursor`
     /// produces follow-cursor segments over the same active stretches. The
@@ -414,7 +419,9 @@ final class EditorModel: ObservableObject {
                 )
             }
         }
-        edit.segments = EffectSegment.resolved(generated, duration: duration)
+        let kind: EffectKind = mode == .clicks ? .zoom : .followCursor
+        let preserved = edit.segments.filter { $0.kind != kind }
+        edit.segments = EffectSegment.resolved(preserved + generated, duration: duration)
         selectedSegmentID = nil
         regenerateCamera()
         save()

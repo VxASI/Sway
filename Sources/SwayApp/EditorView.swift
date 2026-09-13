@@ -28,15 +28,23 @@ private struct EditorContentView: View {
             toolbar
             Divider().overlay(Color.white.opacity(0.06))
 
-            preview
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black)
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    preview
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
 
-            transport
-            SegmentTimelineView(editor: editor, scale: timelineScale)
-                .frame(height: 78)
-                .padding(.horizontal, 20)
-            InspectorPanel(editor: editor)
+                    transport
+                    SegmentTimelineView(editor: editor, scale: timelineScale)
+                        .frame(height: 94)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 12)
+                }
+
+                Divider().overlay(Color.white.opacity(0.06))
+                InspectorSidebar(editor: editor)
+                    .frame(width: 284)
+            }
         }
         .background(Color(red: 0.09, green: 0.09, blue: 0.11))
         .alert("Sway", isPresented: errorBinding) {
@@ -191,58 +199,41 @@ private struct EditorContentView: View {
 }
 
 
-/// The controls under the timeline, in three tabs so the editor stays compact:
-/// the selected segment, the cursor, and the canvas.
-private struct InspectorPanel: View {
+/// A persistent inspector beside the preview keeps effect and cursor controls
+/// readable without compressing them into a single strip below the timeline.
+private struct InspectorSidebar: View {
     @ObservedObject var editor: EditorModel
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case segment, cursor, canvas
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .segment: return "Segment"
-            case .cursor: return "Cursor"
-            case .canvas: return "Canvas"
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Inspector").font(.headline)
+                sectionHeader("Selected Effect", icon: "slider.horizontal.3")
+                segmentControls
+                Divider()
+                sectionHeader("Cursor", icon: "cursorarrow")
+                cursorControls
+                Divider()
+                canvasButton
             }
+            .padding(18)
         }
+        .background(Color.white.opacity(0.03))
     }
 
-    @State private var tab: Tab = .segment
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 260)
-
-            Group {
-                switch tab {
-                case .segment: segmentControls
-                case .cursor: cursorControls
-                case .canvas: canvasControls
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 30)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        .background(Color.white.opacity(0.03))
-        .onChange(of: editor.selectedSegmentID) { id in
-            if id != nil { tab = .segment }
-        }
+    private func sectionHeader(_ title: String, icon: String) -> some View {
+        Label(title, systemImage: icon)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
     }
 
     // MARK: Segment
 
     @ViewBuilder
     private var segmentControls: some View {
-        HStack(spacing: 16) {
-            if let segment = editor.selectedSegment {
+        if let segment = editor.selectedSegment {
+            VStack(alignment: .leading, spacing: 12) {
                 Label(
                     segment.kind == .zoom ? "Zoom" : "Follow Cursor",
                     systemImage: segment.kind == .zoom ? "plus.magnifyingglass" : "cursorarrow.motionlines"
@@ -250,7 +241,7 @@ private struct InspectorPanel: View {
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(segment.kind == .zoom ? Color.purple : Color.blue)
 
-                slider("Intensity", value: segment.zoom, in: 1.2...4,
+                slider(segment.kind == .zoom ? "Intensity" : "Zoom when unstacked", value: segment.zoom, in: 1.2...4,
                        format: { String(format: "%.1f×", $0) }) { value in
                     var updated = segment
                     updated.zoom = value
@@ -268,18 +259,17 @@ private struct InspectorPanel: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
                 Button(role: .destructive) {
                     editor.removeSegment(id: segment.id)
                 } label: {
-                    Label("Remove", systemImage: "trash")
+                    Label("Remove Effect", systemImage: "trash")
                 }
-            } else {
-                Text("Select a segment on the timeline, or add a Zoom or Follow Cursor effect.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer()
+                .buttonStyle(.borderless)
             }
+        } else {
+            Text("Select a segment in either timeline lane to edit it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -292,8 +282,7 @@ private struct InspectorPanel: View {
             change(&updated)
             editor.setCursor(updated)
         }
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 16) {
+        return VStack(alignment: .leading, spacing: 12) {
                 Toggle("Show", isOn: Binding(get: { style.isVisible }, set: { on in
                     update { $0.isVisible = on }
                     editor.save()
@@ -409,7 +398,6 @@ private struct InspectorPanel: View {
                 .help(editor.recordsKeyPresses
                     ? "Fade the cursor out while keys are pressed"
                     : "No key presses were recorded in this recording")
-            }
         }
     }
 
@@ -440,54 +428,23 @@ private struct InspectorPanel: View {
 
     // MARK: Canvas
 
-    private var canvasControls: some View {
-        let style = editor.canvasStyle
-        func update(_ change: (inout CanvasStyle) -> Void) {
-            var updated = style
-            change(&updated)
+    private var canvasButton: some View {
+        Button {
+            var updated = editor.canvasStyle
+            updated.isEnabled.toggle()
             editor.setCanvas(updated)
-        }
-        return HStack(spacing: 16) {
-            Toggle("Canvas", isOn: Binding(get: { style.isEnabled }, set: { on in
-                update { $0.isEnabled = on }
-                editor.save()
-            }))
-            .toggleStyle(.switch)
-            .controlSize(.small)
-
-            if style.isEnabled {
-                Picker("", selection: Binding(get: { style.background }, set: { background in
-                    if background == .custom, style.customImage == nil {
-                        editor.importCanvasImage()
-                    } else {
-                        update { $0.background = background }
-                        editor.save()
-                    }
-                })) {
-                    ForEach(CanvasStyle.Background.allCases) { Text($0.label).tag($0) }
-                }
-                .labelsHidden()
-                .frame(width: 140)
-
-                if style.background == .custom {
-                    Button("Change…") { editor.importCanvasImage() }
-                    slider("Blur", value: style.customBlur, in: 0...1,
-                           format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.customBlur = value } }
-                }
-
-                slider("Padding", value: style.padding, in: 0...0.2,
-                       format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.padding = value } }
-                slider("Corners", value: style.cornerRadius, in: 0...0.1,
-                       format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.cornerRadius = value } }
-                slider("Shadow", value: style.shadow, in: 0...1,
-                       format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.shadow = value } }
-            } else {
-                Text("Float the recording as a rounded card on a gradient background.")
-                    .font(.callout)
+            editor.save()
+        } label: {
+            HStack {
+                Label("Canvas", systemImage: editor.canvasStyle.isEnabled ? "rectangle.inset.filled" : "rectangle")
+                Spacer()
+                Text(editor.canvasStyle.isEnabled ? "On" : "Off")
                     .foregroundStyle(.secondary)
             }
-            Spacer()
+            .frame(maxWidth: .infinity)
         }
+        .buttonStyle(.bordered)
+        .tint(editor.canvasStyle.isEnabled ? .accentColor : nil)
     }
 
     private func slider(
@@ -497,19 +454,18 @@ private struct InspectorPanel: View {
         format: @escaping (Double) -> String,
         onChange: @escaping (Double) -> Void
     ) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(label).foregroundStyle(.secondary)
+                Spacer()
+                Text(format(value)).monospacedDigit()
+            }
+            .font(.callout)
             Slider(
                 value: Binding(get: { value }, set: onChange),
                 in: range,
                 onEditingChanged: { if !$0 { editor.save() } }
             )
-            .frame(width: 120)
-            Text(format(value))
-                .font(.system(.callout, design: .monospaced))
-                .frame(width: 46, alignment: .leading)
         }
     }
 }

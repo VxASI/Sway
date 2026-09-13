@@ -64,18 +64,20 @@ final class FocusRangeTests: XCTestCase {
 }
 
 final class EffectSegmentTests: XCTestCase {
-    func testResolvedSortsClampsAndRemovesOverlaps() {
+    func testResolvedAllowsCrossLaneOverlapAndRemovesSameLaneOverlap() {
         let segments = [
             EffectSegment(kind: .zoom, start: 5, end: 8),
             EffectSegment(kind: .followCursor, start: -1, end: 6),
-            EffectSegment(kind: .zoom, start: 5.9, end: 6.0) // collapses below minimum
+            EffectSegment(kind: .zoom, start: 5.9, end: 6.0)
         ]
         let resolved = EffectSegment.resolved(segments, duration: 7)
 
         XCTAssertEqual(resolved.count, 2)
+        XCTAssertEqual(resolved[0].kind, .followCursor)
         XCTAssertEqual(resolved[0].start, 0)
         XCTAssertEqual(resolved[0].end, 6)
-        XCTAssertEqual(resolved[1].start, 6)
+        XCTAssertEqual(resolved[1].kind, .zoom)
+        XCTAssertEqual(resolved[1].start, 5)
         XCTAssertEqual(resolved[1].end, 7)
     }
 
@@ -105,6 +107,21 @@ final class EffectSegmentTests: XCTestCase {
         let inside = try XCTUnwrap(path.state(at: 6.5))
         let cursor = try XCTUnwrap(track.position(at: 6.5))
         XCTAssertEqual(inside.zoom, 2, accuracy: 0.05)
+        XCTAssertEqual(inside.centerX, cursor.x, accuracy: 0.15)
+        XCTAssertEqual(inside.centerY, cursor.y, accuracy: 0.15)
+    }
+
+    func testStackedFollowUsesZoomLaneIntensityAndTracksCursor() throws {
+        let track = movingTrack(duration: 10)
+        let segments = EffectSegment.resolved([
+            EffectSegment(kind: .zoom, start: 2, end: 8, zoom: 3, centerX: 0.2, centerY: 0.2),
+            EffectSegment(kind: .followCursor, start: 3, end: 7, zoom: 1.4, smoothing: 0.2)
+        ], duration: 10)
+        let path = CameraPathGenerator().generate(track: track, duration: 10, segments: segments)
+
+        let inside = try XCTUnwrap(path.state(at: 6))
+        let cursor = try XCTUnwrap(track.position(at: 6))
+        XCTAssertEqual(inside.zoom, 3, accuracy: 0.05)
         XCTAssertEqual(inside.centerX, cursor.x, accuracy: 0.15)
         XCTAssertEqual(inside.centerY, cursor.y, accuracy: 0.15)
     }
