@@ -307,16 +307,66 @@ private struct InspectorPanel: View {
                        format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.smoothing = value } }
 
                 Picker("Shape", selection: Binding(get: { style.shape }, set: { shape in
-                    update { $0.shape = shape }
-                    editor.save()
+                    if shape == .custom, style.customImage == nil {
+                        editor.importCursorImage()
+                    } else {
+                        update { $0.shape = shape }
+                        editor.save()
+                    }
                 })) {
-                    ForEach(CursorStyle.Shape.allCases) { Text($0.label).tag($0) }
+                    ForEach(CursorStyle.Shape.allCases) { shape in
+                        if shape != .recorded || editor.hasRecordedShapes {
+                            Text(shape.label).tag(shape)
+                        }
+                    }
                 }
                 .frame(width: 170)
-                .disabled(!editor.hasRecordedShapes)
                 .help(editor.hasRecordedShapes
-                    ? "Draw the pointer the system showed, or Sway's arrow"
-                    : "This recording predates pointer-shape capture; the arrow is used")
+                    ? "Draw the pointer the system showed, one of Sway's shapes, or your own image"
+                    : "This recording predates pointer-shape capture, so \"As recorded\" is unavailable")
+
+                if style.shape.isTinted {
+                    Picker("", selection: Binding(get: { style.tint }, set: { tint in
+                        update { $0.tint = tint }
+                        editor.save()
+                    })) {
+                        ForEach(CursorStyle.Tint.allCases) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 90)
+                    .help("Cursor color")
+                }
+                if style.shape == .recorded || style.shape == .halo {
+                    Picker("", selection: Binding(get: { style.recordedColor }, set: { color in
+                        update { $0.recordedColor = color }
+                        editor.save()
+                    })) {
+                        ForEach(CursorStyle.RecordedColor.allCases) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                    .help("Recorded pointers are black on macOS; Light inverts them to match Sway's cursor")
+                }
+                if style.shape == .custom, let custom = style.customImage {
+                    Button("Change…") { editor.importCursorImage() }
+                    Picker("Hotspot", selection: Binding(
+                        get: { hotspotChoice(custom) },
+                        set: { choice in
+                            update {
+                                $0.customImage?.hotspotX = choice.point.x
+                                $0.customImage?.hotspotY = choice.point.y
+                            }
+                            editor.save()
+                        }
+                    )) {
+                        ForEach(HotspotChoice.allCases) { Text($0.label).tag($0) }
+                    }
+                    .frame(width: 170)
+                    slider("Width", value: custom.pointWidth, in: 8...128,
+                           format: { String(format: "%.0f pt", $0) }) { value in
+                        update { $0.customImage?.pointWidth = value }
+                    }
+                }
 
                 Toggle("Click rings", isOn: Binding(get: { style.clickRings }, set: { on in
                     update { $0.clickRings = on }
@@ -363,6 +413,31 @@ private struct InspectorPanel: View {
         }
     }
 
+    enum HotspotChoice: String, CaseIterable, Identifiable {
+        case topLeft, center, topCenter
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .topLeft: return "Top-left (arrow)"
+            case .center: return "Center (dot)"
+            case .topCenter: return "Top-center"
+            }
+        }
+        var point: (x: Double, y: Double) {
+            switch self {
+            case .topLeft: return (0, 0)
+            case .center: return (0.5, 0.5)
+            case .topCenter: return (0.5, 0)
+            }
+        }
+    }
+
+    private func hotspotChoice(_ custom: CursorStyle.CustomImage) -> HotspotChoice {
+        HotspotChoice.allCases.first {
+            abs($0.point.x - custom.hotspotX) < 0.01 && abs($0.point.y - custom.hotspotY) < 0.01
+        } ?? .topLeft
+    }
+
     // MARK: Canvas
 
     private var canvasControls: some View {
@@ -382,13 +457,23 @@ private struct InspectorPanel: View {
 
             if style.isEnabled {
                 Picker("", selection: Binding(get: { style.background }, set: { background in
-                    update { $0.background = background }
-                    editor.save()
+                    if background == .custom, style.customImage == nil {
+                        editor.importCanvasImage()
+                    } else {
+                        update { $0.background = background }
+                        editor.save()
+                    }
                 })) {
                     ForEach(CanvasStyle.Background.allCases) { Text($0.label).tag($0) }
                 }
                 .labelsHidden()
-                .frame(width: 120)
+                .frame(width: 140)
+
+                if style.background == .custom {
+                    Button("Change…") { editor.importCanvasImage() }
+                    slider("Blur", value: style.customBlur, in: 0...1,
+                           format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.customBlur = value } }
+                }
 
                 slider("Padding", value: style.padding, in: 0...0.2,
                        format: { String(format: "%.0f%%", $0 * 100) }) { value in update { $0.padding = value } }
@@ -438,16 +523,14 @@ private struct FocalPointOverlay: View {
 
     var body: some View {
         GeometryReader { geometry in
-            // With the canvas on, the recording sits inset by the padding.
+            // With the canvas on, the recording sits in the same card rect
+            // the renderer uses (source aspect, centered inside the padding).
             let style = editor.canvasStyle
-            let inset = style.isEnabled
-                ? min(geometry.size.width, geometry.size.height) * style.padding
-                : 0
-            let origin = CGPoint(x: inset, y: inset)
-            let size = CGSize(
-                width: geometry.size.width - inset * 2,
-                height: geometry.size.height - inset * 2
-            )
+            let card = style.isEnabled
+                ? style.contentRect(in: geometry.size, contentAspect: editor.project.geometry.aspectRatio)
+                : CGRect(origin: .zero, size: geometry.size)
+            let origin = card.origin
+            let size = card.size
             ZStack {
                 Circle()
                     .strokeBorder(Color.purple, lineWidth: 2)

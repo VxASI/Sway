@@ -221,3 +221,8 @@ segments baked in, progress, trimmed audio, aspect presets, frame-rate cap.
   tree, not just the event tap).
 - Scene transitions. The segment model (`EffectSegment.kind`) is where these
   slot in.
+
+
+## Quick Run
+swift test && ./Scripts/package-app.sh
+open .build/Sway.app

@@ -6,6 +6,7 @@ import Foundation
 import SwayCapture
 import SwayCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Everything the export sheet lets the user choose. Translated into
 /// `ExportOptions` when the export starts.
@@ -38,7 +39,7 @@ struct ExportSettings {
         var id: String { rawValue }
         var label: String { self == .high ? "High" : "Standard" }
         /// Bits per pixel per frame, the usual H.264 sizing rule of thumb.
-        var bitsPerPixel: Double { self == .high ? 0.15 : 0.07 }
+        var bitsPerPixel: Double { self == .high ? 0.22 : 0.10 }
     }
 
     enum FrameRate: String, CaseIterable, Identifiable {
@@ -119,6 +120,7 @@ final class EditorModel: ObservableObject {
             segments: result.edit.segments
         )
         canvas.style = result.edit.canvas
+        canvas.image = CanvasAssets.loadCustomImage(for: result.edit.canvas, in: result.bundle)
         shapes = result.shapes
         shapeImages = CursorRenderer.loadShapeImages(for: result.shapes, in: result.bundle)
         cursor.renderer = CursorRenderer(
@@ -126,6 +128,7 @@ final class EditorModel: ObservableObject {
             track: result.track,
             shapes: result.shapes,
             shapeImages: shapeImages,
+            customImage: CursorRenderer.loadCustomImage(for: result.edit.cursor, in: result.bundle),
             scale: result.project.geometry.scale
         )
         // The preview renders itself (see PreviewView); the player only
@@ -294,9 +297,63 @@ final class EditorModel: ObservableObject {
     // MARK: - Canvas
 
     func setCanvas(_ style: CanvasStyle) {
+        let previousFile = edit.canvas.customImage
         edit.canvas = style.clamped()
         canvas.style = edit.canvas
+        if edit.canvas.customImage != previousFile || (edit.canvas.background == .custom && canvas.image == nil) {
+            canvas.image = CanvasAssets.loadCustomImage(for: edit.canvas, in: bundle)
+        }
         if !isPlaying { seek(to: playhead) }
+    }
+
+    /// Copies a picked image into the bundle's `canvas/` directory and
+    /// switches the background to it.
+    func importCanvasImage() {
+        guard let url = EditorModel.pickImage(message: "Choose a background image") else { return }
+        do {
+            let fileName = try EditorModel.copyImage(at: url, into: bundle.canvasDirectoryURL)
+            var updated = edit.canvas
+            updated.isEnabled = true
+            updated.background = .custom
+            updated.customImage = fileName
+            setCanvas(updated)
+            save()
+        } catch {
+            errorMessage = "Could not import that image.\n\n\(error)"
+        }
+    }
+
+    /// Copies a picked pointer image into the bundle's `cursors/` directory
+    /// and switches the cursor shape to it. The hotspot defaults to the
+    /// top-left corner (an arrow); the Cursor tab can move it.
+    func importCursorImage() {
+        guard let url = EditorModel.pickImage(message: "Choose a cursor image (PNG with transparency)") else { return }
+        do {
+            let fileName = try EditorModel.copyImage(at: url, into: bundle.cursorsDirectoryURL)
+            var updated = edit.cursor
+            updated.shape = .custom
+            updated.customImage = CursorStyle.CustomImage(fileName: fileName)
+            setCursor(updated)
+            save()
+        } catch {
+            errorMessage = "Could not import that image.\n\n\(error)"
+        }
+    }
+
+    private static func pickImage(message: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg, .heic, .tiff]
+        panel.message = message
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private static func copyImage(at url: URL, into directory: URL) throws -> String {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileName = "custom-\(UUID().uuidString.prefix(8)).\(url.pathExtension.isEmpty ? "png" : url.pathExtension)"
+        try FileManager.default.copyItem(at: url, to: directory.appendingPathComponent(fileName))
+        return fileName
     }
 
     // MARK: - Cursor
@@ -308,6 +365,7 @@ final class EditorModel: ObservableObject {
             track: track,
             shapes: shapes,
             shapeImages: shapeImages,
+            customImage: CursorRenderer.loadCustomImage(for: edit.cursor, in: bundle),
             scale: project.geometry.scale
         )
         if !isPlaying { seek(to: playhead) }
@@ -495,10 +553,11 @@ final class CameraBox: @unchecked Sendable {
 }
 
 
-/// Same idea as `CameraBox`, for the canvas style.
+/// Same idea as `CameraBox`, for the canvas style and its imported image.
 final class CanvasBox: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = CanvasStyle.off
+    private var imageStorage: CGImage?
 
     var style: CanvasStyle {
         get {
@@ -509,6 +568,19 @@ final class CanvasBox: @unchecked Sendable {
         set {
             lock.lock()
             storage = newValue
+            lock.unlock()
+        }
+    }
+
+    var image: CGImage? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return imageStorage
+        }
+        set {
+            lock.lock()
+            imageStorage = newValue
             lock.unlock()
         }
     }

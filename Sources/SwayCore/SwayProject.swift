@@ -65,6 +65,7 @@ public struct SwayProjectBundle {
     public static let editFileName = "edit.json"
     public static let shapesFileName = "shapes.json"
     public static let cursorsDirectoryName = "cursors"
+    public static let canvasDirectoryName = "canvas"
     public static let pathExtension = "sway"
 
     public let url: URL
@@ -81,6 +82,11 @@ public struct SwayProjectBundle {
     public var shapesURL: URL { url.appendingPathComponent(SwayProjectBundle.shapesFileName) }
     public var cursorsDirectoryURL: URL {
         url.appendingPathComponent(SwayProjectBundle.cursorsDirectoryName, isDirectory: true)
+    }
+    /// Imported canvas backgrounds live with the recording so the edit stays
+    /// self-contained when the bundle is moved.
+    public var canvasDirectoryURL: URL {
+        url.appendingPathComponent(SwayProjectBundle.canvasDirectoryName, isDirectory: true)
     }
 
     @discardableResult

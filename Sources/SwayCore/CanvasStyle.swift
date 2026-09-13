@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// The "clean" presentation: the recording floats as a rounded card with a
@@ -16,6 +17,9 @@ public struct CanvasStyle: Codable, Hashable, Sendable {
         case ocean
         /// Near-black greys.
         case graphite
+        /// An image the user imported; see `customImage`. Falls back to
+        /// graphite until one is set.
+        case custom
 
         public var id: String { rawValue }
 
@@ -26,6 +30,7 @@ public struct CanvasStyle: Codable, Hashable, Sendable {
             case .sunset: return "Sunset"
             case .ocean: return "Ocean"
             case .graphite: return "Graphite"
+            case .custom: return "Custom image…"
             }
         }
 
@@ -42,7 +47,7 @@ public struct CanvasStyle: Codable, Hashable, Sendable {
                 return [(0.95, 0.45, 0.20), (0.99, 0.80, 0.30), (0.95, 0.35, 0.55), (0.55, 0.20, 0.45)]
             case .ocean:
                 return [(0.08, 0.30, 0.60), (0.10, 0.65, 0.75), (0.25, 0.40, 0.90), (0.05, 0.20, 0.40)]
-            case .graphite:
+            case .graphite, .custom:
                 return [(0.11, 0.11, 0.13), (0.20, 0.20, 0.24), (0.07, 0.07, 0.09)]
             }
         }
@@ -57,19 +62,71 @@ public struct CanvasStyle: Codable, Hashable, Sendable {
     /// Shadow strength, 0 (none) to 1.
     public var shadow: Double
     public var background: Background
+    /// File name of the imported background inside the bundle's `canvas/`
+    /// directory, when `background == .custom`.
+    public var customImage: String?
+    /// Softening applied to a custom image, 0 (sharp) to 1 (very soft).
+    public var customBlur: Double
 
     public init(
         isEnabled: Bool = false,
         padding: Double = 0.07,
         cornerRadius: Double = 0.025,
         shadow: Double = 0.6,
-        background: Background = .spectrum
+        background: Background = .spectrum,
+        customImage: String? = nil,
+        customBlur: Double = 0.3
     ) {
         self.isEnabled = isEnabled
         self.padding = padding
         self.cornerRadius = cornerRadius
         self.shadow = shadow
         self.background = background
+        self.customImage = customImage
+        self.customBlur = customBlur
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case isEnabled, padding, cornerRadius, shadow, background, customImage, customBlur
+    }
+
+    /// Tolerant decoding so edits from older builds still open.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CanvasStyle()
+        isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? d.isEnabled
+        padding = try c.decodeIfPresent(Double.self, forKey: .padding) ?? d.padding
+        cornerRadius = try c.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? d.cornerRadius
+        shadow = try c.decodeIfPresent(Double.self, forKey: .shadow) ?? d.shadow
+        background = try c.decodeIfPresent(Background.self, forKey: .background) ?? d.background
+        customImage = try c.decodeIfPresent(String.self, forKey: .customImage)
+        customBlur = try c.decodeIfPresent(Double.self, forKey: .customBlur) ?? d.customBlur
+    }
+
+    /// Where the recording sits on a canvas of `outputSize`: the largest rect
+    /// with the recording's own aspect ratio that fits inside the padding,
+    /// centered. Keeping the source aspect is what guarantees the whole
+    /// recording is visible at 1x - an inset rect with a slightly different
+    /// aspect would have to crop the top and bottom to fill itself.
+    /// Coordinates are origin-agnostic (the rect is symmetric).
+    public func contentRect(in outputSize: CGSize, contentAspect: Double) -> CGRect {
+        let shorter = min(outputSize.width, outputSize.height)
+        let inset = (shorter * clamp(padding, 0, 0.25)).rounded()
+        let availableWidth = max(2, outputSize.width - inset * 2)
+        let availableHeight = max(2, outputSize.height - inset * 2)
+        let aspect = contentAspect > 0 ? contentAspect : availableWidth / availableHeight
+        var width = availableWidth
+        var height = (width / aspect).rounded()
+        if height > availableHeight {
+            height = availableHeight
+            width = (height * aspect).rounded()
+        }
+        return CGRect(
+            x: ((outputSize.width - width) / 2).rounded(),
+            y: ((outputSize.height - height) / 2).rounded(),
+            width: max(2, width),
+            height: max(2, height)
+        )
     }
 
     public static let off = CanvasStyle(isEnabled: false)
@@ -80,6 +137,7 @@ public struct CanvasStyle: Codable, Hashable, Sendable {
         style.padding = clamp(style.padding, 0, 0.25)
         style.cornerRadius = clamp(style.cornerRadius, 0, 0.12)
         style.shadow = clamp(style.shadow, 0, 1)
+        style.customBlur = clamp(style.customBlur, 0, 1)
         return style
     }
 }

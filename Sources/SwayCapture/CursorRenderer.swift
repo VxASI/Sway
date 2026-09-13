@@ -30,8 +30,11 @@ public struct CursorRenderer {
     /// Pointer images by shape ID, at the origin, already scaled to source
     /// pixels at the chosen size.
     private let shapeImages: [String: (image: CIImage, hotspot: CGPoint)]
-    /// Sway's arrow, rasterized once at the origin.
-    private let arrow: CIImage?
+    /// The drawn shape (arrow, rounded, dot), rasterized once at the origin,
+    /// with the hotspot offset inside it.
+    private let drawn: (image: CIImage, hotspot: CGPoint)?
+    /// The imported pointer, scaled and with its hotspot in pixels.
+    private let custom: (image: CIImage, hotspot: CGPoint)?
     private let arrowSize: Double
 
     static let clickRingDuration: TimeInterval = 0.45
@@ -44,6 +47,7 @@ public struct CursorRenderer {
         track: CursorTrack,
         shapes: CursorShapeTrack = CursorShapeTrack(),
         shapeImages: [String: CGImage] = [:],
+        customImage: CGImage? = nil,
         scale: Double
     ) {
         let style = style.clamped()
@@ -57,7 +61,20 @@ public struct CursorRenderer {
 
         let sizeFactor = scale * style.size
         arrowSize = 24.0 * sizeFactor
-        arrow = CursorRenderer.rasterizeArrow(size: arrowSize)
+        drawn = CursorRenderer.rasterize(style.shape, size: arrowSize, tint: style.tint)
+
+        if let customImage, let spec = style.customImage, customImage.width > 0, customImage.height > 0 {
+            let targetWidth = spec.pointWidth * sizeFactor
+            let factor = targetWidth / Double(customImage.width)
+            let image = CIImage(cgImage: customImage)
+                .transformed(by: CGAffineTransform(scaleX: factor, y: factor))
+            custom = (image, CGPoint(
+                x: spec.hotspotX * image.extent.width,
+                y: spec.hotspotY * image.extent.height
+            ))
+        } else {
+            custom = nil
+        }
 
         var images: [String: (CIImage, CGPoint)] = [:]
         for shape in shapes.shapes {
@@ -66,10 +83,16 @@ public struct CursorRenderer {
             // source pixels at the chosen size.
             let targetWidth = shape.width * sizeFactor
             let targetHeight = shape.height * sizeFactor
-            let image = CIImage(cgImage: cgImage).transformed(by: CGAffineTransform(
+            var image = CIImage(cgImage: cgImage).transformed(by: CGAffineTransform(
                 scaleX: targetWidth / Double(cgImage.width),
                 y: targetHeight / Double(cgImage.height)
             ))
+            if style.recordedColor == .light {
+                // macOS pointers are black with a white edge; flip the
+                // luminance so they read like Sway's white cursor. Alpha is
+                // untouched, so the silhouette is preserved.
+                image = image.applyingFilter("CIColorInvert")
+            }
             images[shape.id] = (image, CGPoint(x: shape.hotspotX * sizeFactor, y: shape.hotspotY * sizeFactor))
         }
         self.shapeImages = images
@@ -135,21 +158,39 @@ public struct CursorRenderer {
     // MARK: - Layers
 
     private func pointerImage(at time: TimeInterval, center: CGPoint) -> CIImage? {
-        if style.shape == .recorded,
-           let shape = shapes.shape(at: time),
-           let entry = shapeImages[shape.id] {
-            let height = entry.image.extent.height
-            return entry.image.transformed(by: CGAffineTransform(
-                translationX: center.x - entry.hotspot.x,
-                y: center.y + entry.hotspot.y - height
-            ))
+        switch style.shape {
+        case .recorded:
+            return recordedImage(at: time, center: center) ?? place(drawn, at: center)
+        case .custom:
+            return place(custom, at: center) ?? place(drawn, at: center)
+        case .halo:
+            let ring = place(drawn, at: center)
+            let pointer = recordedImage(at: time, center: center)
+                ?? place(CursorRenderer.rasterize(.arrow, size: arrowSize, tint: style.tint), at: center)
+            switch (ring, pointer) {
+            case let (r?, p?): return p.composited(over: r)
+            case let (r?, nil): return r
+            case let (nil, p?): return p
+            default: return nil
+            }
+        case .arrow, .rounded, .dot:
+            return place(drawn, at: center)
         }
-        let padding = arrowSize * 0.2
-        let height = arrowSize + padding * 2
-        // Places the tip exactly on the recorded cursor position.
-        return arrow?.transformed(by: CGAffineTransform(
-            translationX: center.x - padding,
-            y: center.y - height + padding
+    }
+
+    private func recordedImage(at time: TimeInterval, center: CGPoint) -> CIImage? {
+        guard let shape = shapes.shape(at: time), let entry = shapeImages[shape.id] else { return nil }
+        return place(entry, at: center)
+    }
+
+    /// Positions an origin-based image so its hotspot lands on `center`.
+    /// Hotspots are top-left origin (y down); CoreImage is bottom-left.
+    private func place(_ entry: (image: CIImage, hotspot: CGPoint)?, at center: CGPoint) -> CIImage? {
+        guard let entry else { return nil }
+        let height = entry.image.extent.height
+        return entry.image.transformed(by: CGAffineTransform(
+            translationX: center.x - entry.hotspot.x,
+            y: center.y + entry.hotspot.y - height
         ))
     }
 
@@ -226,34 +267,80 @@ public struct CursorRenderer {
         return t * t * (3 - 2 * t)
     }
 
-    private static func rasterizeArrow(size: Double) -> CIImage? {
-        // Arrow outline in a unit box with the hotspot (the tip) at (0, 0) and
-        // y growing downwards, the way a cursor is normally described.
-        let points: [CGPoint] = [
-            CGPoint(x: 0.00, y: 0.00), CGPoint(x: 0.00, y: 0.78), CGPoint(x: 0.22, y: 0.60),
-            CGPoint(x: 0.36, y: 0.95), CGPoint(x: 0.52, y: 0.88), CGPoint(x: 0.38, y: 0.54),
-            CGPoint(x: 0.64, y: 0.54)
-        ]
+    /// Rasterizes one of the drawn shapes at the origin. Returns the image and
+    /// where the hotspot sits inside it (top-left origin).
+    private static func rasterize(_ shape: CursorStyle.Shape, size: Double, tint: CursorStyle.Tint) -> (image: CIImage, hotspot: CGPoint)? {
+        let fill = tint.rgb
+        let line = tint.outline
+        let fillColor = CGColor(red: fill.0, green: fill.1, blue: fill.2, alpha: 1)
+        let lineColor = CGColor(red: line.0, green: line.1, blue: line.2, alpha: shape == .halo ? 0 : 1)
         let padding = size * 0.2
-        let height = size + padding * 2
-        return drawing(size: CGSize(width: size + padding * 2, height: height), origin: .zero) { context in
-            context.setShadow(offset: CGSize(width: 0, height: -size * 0.05), blur: size * 0.12)
-            let path = CGMutablePath()
-            for (index, point) in points.enumerated() {
-                let converted = CGPoint(
-                    x: padding + point.x * size,
-                    y: height - padding - point.y * size
-                )
-                if index == 0 { path.move(to: converted) } else { path.addLine(to: converted) }
+
+        switch shape {
+        case .arrow, .rounded, .recorded, .custom:
+            // Arrow outline in a unit box with the hotspot (the tip) at (0, 0)
+            // and y growing downwards, the way a cursor is normally described.
+            let classic: [CGPoint] = [
+                CGPoint(x: 0.00, y: 0.00), CGPoint(x: 0.00, y: 0.78), CGPoint(x: 0.22, y: 0.60),
+                CGPoint(x: 0.36, y: 0.95), CGPoint(x: 0.52, y: 0.88), CGPoint(x: 0.38, y: 0.54),
+                CGPoint(x: 0.64, y: 0.54)
+            ]
+            // A stubbier, wider pointer that rounds well.
+            let rounded: [CGPoint] = [
+                CGPoint(x: 0.00, y: 0.00), CGPoint(x: 0.00, y: 0.72), CGPoint(x: 0.20, y: 0.56),
+                CGPoint(x: 0.33, y: 0.86), CGPoint(x: 0.50, y: 0.79), CGPoint(x: 0.37, y: 0.50),
+                CGPoint(x: 0.62, y: 0.50)
+            ]
+            let points = shape == .rounded ? rounded : classic
+            let height = size + padding * 2
+            let image = drawing(size: CGSize(width: size + padding * 2, height: height), origin: .zero) { context in
+                context.setShadow(offset: CGSize(width: 0, height: -size * 0.05), blur: size * 0.12)
+                let path = CGMutablePath()
+                for (index, point) in points.enumerated() {
+                    let converted = CGPoint(x: padding + point.x * size, y: height - padding - point.y * size)
+                    if index == 0 { path.move(to: converted) } else { path.addLine(to: converted) }
+                }
+                path.closeSubpath()
+                if shape == .rounded {
+                    context.setLineJoin(.round)
+                    context.setLineCap(.round)
+                }
+                context.addPath(path)
+                context.setFillColor(fillColor)
+                context.fillPath()
+                context.addPath(path)
+                context.setStrokeColor(lineColor)
+                context.setLineWidth(max(1, size * (shape == .rounded ? 0.09 : 0.05)))
+                context.strokePath()
             }
-            path.closeSubpath()
-            context.addPath(path)
-            context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-            context.fillPath()
-            context.addPath(path)
-            context.setStrokeColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
-            context.setLineWidth(max(1, size * 0.05))
-            context.strokePath()
+            return image.map { ($0, CGPoint(x: padding, y: padding)) }
+
+        case .dot:
+            let radius = size * 0.28
+            let box = radius * 2 + padding * 2
+            let image = drawing(size: CGSize(width: box, height: box), origin: .zero) { context in
+                context.setShadow(offset: .zero, blur: size * 0.12)
+                let rect = CGRect(x: padding, y: padding, width: radius * 2, height: radius * 2)
+                context.setFillColor(fillColor)
+                context.fillEllipse(in: rect)
+                context.setStrokeColor(lineColor)
+                context.setLineWidth(max(1.5, size * 0.06))
+                context.strokeEllipse(in: rect)
+            }
+            return image.map { ($0, CGPoint(x: box / 2, y: box / 2)) }
+
+        case .halo:
+            let radius = size * 0.9
+            let box = radius * 2 + padding * 2
+            let image = drawing(size: CGSize(width: box, height: box), origin: .zero) { context in
+                let rect = CGRect(x: padding, y: padding, width: radius * 2, height: radius * 2)
+                context.setFillColor(CGColor(red: fill.0, green: fill.1, blue: fill.2, alpha: 0.28))
+                context.fillEllipse(in: rect)
+                context.setStrokeColor(CGColor(red: fill.0, green: fill.1, blue: fill.2, alpha: 0.85))
+                context.setLineWidth(max(1.5, size * 0.07))
+                context.strokeEllipse(in: rect.insetBy(dx: 1, dy: 1))
+            }
+            return image.map { ($0, CGPoint(x: box / 2, y: box / 2)) }
         }
     }
 
@@ -278,6 +365,14 @@ public struct CursorRenderer {
         guard let cgImage = context.makeImage() else { return nil }
         return CIImage(cgImage: cgImage)
             .transformed(by: CGAffineTransform(translationX: origin.x, y: origin.y))
+    }
+
+    /// Loads the user's imported pointer image, if the style has one.
+    public static func loadCustomImage(for style: CursorStyle, in bundle: SwayProjectBundle) -> CGImage? {
+        guard let spec = style.customImage else { return nil }
+        let url = bundle.cursorsDirectoryURL.appendingPathComponent(spec.fileName)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
     /// Loads the pointer PNGs a bundle recorded, keyed by shape ID.

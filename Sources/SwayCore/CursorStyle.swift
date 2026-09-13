@@ -6,14 +6,88 @@ import Foundation
 public struct CursorStyle: Codable, Hashable, Sendable {
     public enum Shape: String, Codable, CaseIterable, Sendable, Identifiable {
         /// The pointer the user actually saw: arrow, I-beam, hand, resize...
-        /// captured during recording. Falls back to the arrow when a recording
+        /// captured during recording. Falls back to `.arrow` when a recording
         /// predates shape capture.
         case recorded
-        /// Sway's own arrow, regardless of what the system showed.
+        /// Sway's classic arrow: sharp, filled with the tint, contrasting outline.
         case arrow
+        /// A softer, rounded pointer.
+        case rounded
+        /// A solid dot on the hotspot - unambiguous in tutorials.
+        case dot
+        /// The recorded pointer (or the arrow) inside a translucent tinted ring.
+        case halo
+        /// A PNG the user imported; see `customImage`.
+        case custom
 
         public var id: String { rawValue }
-        public var label: String { self == .recorded ? "As recorded" : "Arrow" }
+
+        public var label: String {
+            switch self {
+            case .recorded: return "As recorded"
+            case .arrow: return "Classic arrow"
+            case .rounded: return "Rounded arrow"
+            case .dot: return "Dot"
+            case .halo: return "Halo"
+            case .custom: return "Custom image…"
+            }
+        }
+
+        /// Whether `tint` colors this shape.
+        public var isTinted: Bool {
+            switch self {
+            case .arrow, .rounded, .dot, .halo: return true
+            case .recorded, .custom: return false
+            }
+        }
+    }
+
+    /// Fill color for the drawn shapes; the outline is the contrasting one.
+    public enum Tint: String, Codable, CaseIterable, Sendable, Identifiable {
+        case white, black, blue, orange, purple, green
+
+        public var id: String { rawValue }
+        public var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+
+        public var rgb: (Double, Double, Double) {
+            switch self {
+            case .white: return (1, 1, 1)
+            case .black: return (0.08, 0.08, 0.09)
+            case .blue: return (0.30, 0.56, 1.0)
+            case .orange: return (1.0, 0.58, 0.22)
+            case .purple: return (0.62, 0.40, 0.95)
+            case .green: return (0.30, 0.82, 0.50)
+            }
+        }
+
+        public var outline: (Double, Double, Double) {
+            self == .black ? (1, 1, 1) : (0, 0, 0)
+        }
+    }
+
+    /// How a recorded system pointer is colored. macOS pointers are black with
+    /// a white edge; `.light` inverts that so they match Sway's white cursor.
+    public enum RecordedColor: String, Codable, CaseIterable, Sendable, Identifiable {
+        case light, dark
+        public var id: String { rawValue }
+        public var label: String { self == .light ? "Light" : "Dark (as shown)" }
+    }
+
+    /// An imported pointer image, stored in the bundle's `cursors/` directory,
+    /// with its hotspot as a fraction of the image (0...1, top-left origin).
+    public struct CustomImage: Codable, Hashable, Sendable {
+        public var fileName: String
+        public var hotspotX: Double
+        public var hotspotY: Double
+        /// Displayed width in points at 1x; height follows the image's aspect.
+        public var pointWidth: Double
+
+        public init(fileName: String, hotspotX: Double = 0, hotspotY: Double = 0, pointWidth: Double = 24) {
+            self.fileName = fileName
+            self.hotspotX = hotspotX
+            self.hotspotY = hotspotY
+            self.pointWidth = pointWidth
+        }
     }
 
     public enum RingColor: String, Codable, CaseIterable, Sendable, Identifiable {
@@ -43,6 +117,9 @@ public struct CursorStyle: Codable, Hashable, Sendable {
     /// 0 = the raw recorded path, 1 = heavily smoothed motion.
     public var smoothing: Double
     public var shape: Shape
+    public var tint: Tint
+    public var recordedColor: RecordedColor
+    public var customImage: CustomImage?
     public var clickRings: Bool
     public var ringColor: RingColor
     /// Dims everything except a soft circle around the cursor.
@@ -58,6 +135,9 @@ public struct CursorStyle: Codable, Hashable, Sendable {
         size: Double = 1.4,
         smoothing: Double = 0.35,
         shape: Shape = .recorded,
+        tint: Tint = .white,
+        recordedColor: RecordedColor = .light,
+        customImage: CustomImage? = nil,
         clickRings: Bool = true,
         ringColor: RingColor = .white,
         spotlight: Bool = false,
@@ -69,6 +149,9 @@ public struct CursorStyle: Codable, Hashable, Sendable {
         self.size = size
         self.smoothing = smoothing
         self.shape = shape
+        self.tint = tint
+        self.recordedColor = recordedColor
+        self.customImage = customImage
         self.clickRings = clickRings
         self.ringColor = ringColor
         self.spotlight = spotlight
@@ -79,11 +162,42 @@ public struct CursorStyle: Codable, Hashable, Sendable {
 
     public static let standard = CursorStyle()
 
+    private enum CodingKeys: String, CodingKey {
+        case isVisible, size, smoothing, shape, tint, recordedColor, customImage, clickRings, ringColor
+        case spotlight, hideWhenIdle, idleSeconds, hideWhileTyping
+    }
+
+    /// Tolerant decoding: every field falls back to its default, so an edit
+    /// written by an older build still opens.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = CursorStyle.standard
+        isVisible = try c.decodeIfPresent(Bool.self, forKey: .isVisible) ?? d.isVisible
+        size = try c.decodeIfPresent(Double.self, forKey: .size) ?? d.size
+        smoothing = try c.decodeIfPresent(Double.self, forKey: .smoothing) ?? d.smoothing
+        shape = try c.decodeIfPresent(Shape.self, forKey: .shape) ?? d.shape
+        tint = try c.decodeIfPresent(Tint.self, forKey: .tint) ?? d.tint
+        recordedColor = try c.decodeIfPresent(RecordedColor.self, forKey: .recordedColor) ?? d.recordedColor
+        customImage = try c.decodeIfPresent(CustomImage.self, forKey: .customImage)
+        clickRings = try c.decodeIfPresent(Bool.self, forKey: .clickRings) ?? d.clickRings
+        ringColor = try c.decodeIfPresent(RingColor.self, forKey: .ringColor) ?? d.ringColor
+        spotlight = try c.decodeIfPresent(Bool.self, forKey: .spotlight) ?? d.spotlight
+        hideWhenIdle = try c.decodeIfPresent(Bool.self, forKey: .hideWhenIdle) ?? d.hideWhenIdle
+        idleSeconds = try c.decodeIfPresent(Double.self, forKey: .idleSeconds) ?? d.idleSeconds
+        hideWhileTyping = try c.decodeIfPresent(Bool.self, forKey: .hideWhileTyping) ?? d.hideWhileTyping
+    }
+
     public func clamped() -> CursorStyle {
         var style = self
         style.size = clamp(style.size, 0.5, 3)
         style.smoothing = clamp(style.smoothing, 0, 1)
         style.idleSeconds = clamp(style.idleSeconds, 0.5, 10)
+        if var custom = style.customImage {
+            custom.hotspotX = clamp(custom.hotspotX, 0, 1)
+            custom.hotspotY = clamp(custom.hotspotY, 0, 1)
+            custom.pointWidth = clamp(custom.pointWidth, 8, 128)
+            style.customImage = custom
+        }
         return style
     }
 

@@ -67,7 +67,11 @@ public final class CinematicExporter {
     private let bundle: SwayProjectBundle
     private let options: ExportOptions
     private let overrideCamera: CameraPath?
-    private let context = CIContext()
+    private let context = CIContext(options: [
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any,
+        .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB) as Any,
+        .highQualityDownsample: true
+    ])
 
     /// `camera` overrides the path stored in the bundle, which is how the
     /// editor exports the range the user is currently looking at.
@@ -170,14 +174,26 @@ public final class CinematicExporter {
             if reader.status == .reading { reader.cancelReading() }
             if writer.status == .writing { writer.cancelWriting() }
         }
-        var videoSettings: [String: Any] = [
-            AVVideoCodecKey: options.codec,
-            AVVideoWidthKey: Int(outputSize.width),
-            AVVideoHeightKey: Int(outputSize.height)
+        var compression: [String: Any] = [
+            AVVideoExpectedSourceFrameRateKey: frameRate,
+            AVVideoMaxKeyFrameIntervalKey: frameRate * 2,
+            // Offline encode: B-frames buy quality per bit at no cost here.
+            AVVideoAllowFrameReorderingKey: true
         ]
         if let bitRate = options.averageBitRate {
-            videoSettings[AVVideoCompressionPropertiesKey] = [AVVideoAverageBitRateKey: bitRate]
+            compression[AVVideoAverageBitRateKey] = bitRate
         }
+        if options.codec == .h264 {
+            compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+            compression[AVVideoH264EntropyModeKey] = AVVideoH264EntropyModeCABAC
+        }
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: options.codec,
+            AVVideoWidthKey: Int(outputSize.width),
+            AVVideoHeightKey: Int(outputSize.height),
+            AVVideoCompressionPropertiesKey: compression,
+            AVVideoColorPropertiesKey: ScreenRecorder.sRGBColorProperties
+        ]
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = false
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
@@ -225,8 +241,10 @@ public final class CinematicExporter {
             track: track,
             shapes: shapes,
             shapeImages: CursorRenderer.loadShapeImages(for: shapes, in: bundle),
+            customImage: CursorRenderer.loadCustomImage(for: options.cursor, in: bundle),
             scale: project.geometry.scale
         )
+        let canvasImage = options.canvas.flatMap { CanvasAssets.loadCustomImage(for: $0, in: bundle) }
 
         // Both tracks are pumped at the same time. AVAssetWriter interleaves
         // its inputs and stops accepting video once it gets too far ahead of
@@ -290,6 +308,7 @@ public final class CinematicExporter {
                             time: outputTime,
                             outputSize: outputSize,
                             renderer: renderer,
+                            canvasImage: canvasImage,
                             pool: adaptor.pixelBufferPool
                         ) {
                             adaptor.append(
@@ -394,6 +413,7 @@ public final class CinematicExporter {
         time: TimeInterval,
         outputSize: CGSize,
         renderer: CursorRenderer,
+        canvasImage: CGImage?,
         pool: CVPixelBufferPool?
     ) -> CVPixelBuffer? {
         let image = CameraFrameRenderer.render(
@@ -402,7 +422,8 @@ public final class CinematicExporter {
             time: time,
             outputSize: outputSize,
             cursor: renderer,
-            canvas: options.canvas
+            canvas: options.canvas,
+            canvasImage: canvasImage
         )
 
         var output: CVPixelBuffer?

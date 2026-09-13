@@ -18,14 +18,19 @@ public enum CameraFrameRenderer {
         time: TimeInterval,
         outputSize: CGSize,
         cursor: CursorRenderer?,
-        canvas: CanvasStyle? = nil
+        canvas: CanvasStyle? = nil,
+        canvasImage: CGImage? = nil
     ) -> CIImage {
         guard let canvas, canvas.isEnabled else {
             return frame(source: source, camera: camera, time: time, targetSize: outputSize, cursor: cursor)
         }
 
         let style = canvas.clamped()
-        let assets = CanvasAssets.shared.assets(for: style, outputSize: outputSize)
+        // The card keeps the recording's aspect so 1x shows all of it.
+        let sourceAspect = source.extent.height > 0 ? source.extent.width / source.extent.height : 1
+        let assets = CanvasAssets.shared.assets(
+            for: style, outputSize: outputSize, contentAspect: sourceAspect, customImage: canvasImage
+        )
         let content = frame(
             source: source, camera: camera, time: time,
             targetSize: assets.contentRect.size, cursor: cursor
@@ -91,13 +96,29 @@ public enum CameraFrameRenderer {
         if let cursor {
             image = cursor.draw(on: image, fullExtent: extent, time: time)
         }
-        return image
+        let cropped = image
             .cropped(to: cropRect)
             .transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
-            .transformed(by: CGAffineTransform(
-                scaleX: targetSize.width / cropRect.width,
-                y: targetSize.height / cropRect.height
-            ))
+        return resample(cropped, from: cropRect.size, to: targetSize)
+            .cropped(to: CGRect(origin: .zero, size: targetSize))
+    }
+
+    /// Scales with a Lanczos kernel instead of CoreImage's default bilinear
+    /// sampling. Bilinear softens text when zooming in and aliases it when
+    /// shrinking for the preview; Lanczos keeps UI edges crisp both ways,
+    /// which is what makes the result look like the screen rather than a
+    /// video of the screen.
+    private static func resample(_ image: CIImage, from sourceSize: CGSize, to targetSize: CGSize) -> CIImage {
+        let scale = targetSize.height / sourceSize.height
+        let aspect = (targetSize.width / sourceSize.width) / scale
+        if abs(scale - 1) < 0.001, abs(aspect - 1) < 0.001 { return image }
+        let filter = CIFilter.lanczosScaleTransform()
+        filter.inputImage = image
+        filter.scale = Float(scale)
+        filter.aspectRatio = Float(aspect)
+        return filter.outputImage ?? image.transformed(by: CGAffineTransform(
+            scaleX: targetSize.width / sourceSize.width, y: scale
+        ))
     }
 }
 
@@ -105,7 +126,7 @@ public enum CameraFrameRenderer {
 /// gradient, the card's shadow and its rounded mask - built once per
 /// (style, output size) and reused. Preview and export render at different
 /// sizes concurrently, so the cache is locked and keeps a few entries.
-final class CanvasAssets: @unchecked Sendable {
+public final class CanvasAssets: @unchecked Sendable {
     struct Assets {
         let contentRect: CGRect
         let background: CIImage
@@ -117,9 +138,19 @@ final class CanvasAssets: @unchecked Sendable {
         let style: CanvasStyle
         let width: Int
         let height: Int
+        let aspectMilli: Int
+        let imageIdentity: ObjectIdentifier?
     }
 
     static let shared = CanvasAssets()
+
+    /// Loads the user's imported background, if the style has one.
+    public static func loadCustomImage(for style: CanvasStyle, in bundle: SwayProjectBundle) -> CGImage? {
+        guard style.background == .custom, let fileName = style.customImage else { return nil }
+        let url = bundle.canvasDirectoryURL.appendingPathComponent(fileName)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
     private let lock = NSLock()
     private var cache: [Key: Assets] = [:]
     private var order: [Key] = []
@@ -128,8 +159,19 @@ final class CanvasAssets: @unchecked Sendable {
     /// every frame, since a CIImage is a recipe, not pixels.
     private let bakeContext = CIContext(options: [.cacheIntermediates: false])
 
-    func assets(for style: CanvasStyle, outputSize: CGSize) -> Assets {
-        let key = Key(style: style, width: Int(outputSize.width), height: Int(outputSize.height))
+    func assets(
+        for style: CanvasStyle,
+        outputSize: CGSize,
+        contentAspect: Double,
+        customImage: CGImage? = nil
+    ) -> Assets {
+        let key = Key(
+            style: style,
+            width: Int(outputSize.width),
+            height: Int(outputSize.height),
+            aspectMilli: Int((contentAspect * 1000).rounded()),
+            imageIdentity: customImage.map { ObjectIdentifier($0) }
+        )
         lock.lock()
         if let cached = cache[key] {
             lock.unlock()
@@ -137,7 +179,7 @@ final class CanvasAssets: @unchecked Sendable {
         }
         lock.unlock()
 
-        let built = build(style: style, outputSize: outputSize)
+        let built = build(style: style, outputSize: outputSize, contentAspect: contentAspect, customImage: customImage)
         lock.lock()
         cache[key] = built
         order.append(key)
@@ -148,15 +190,14 @@ final class CanvasAssets: @unchecked Sendable {
         return built
     }
 
-    private func build(style: CanvasStyle, outputSize: CGSize) -> Assets {
+    private func build(
+        style: CanvasStyle,
+        outputSize: CGSize,
+        contentAspect: Double,
+        customImage: CGImage?
+    ) -> Assets {
         let shorter = min(outputSize.width, outputSize.height)
-        let padding = (shorter * style.padding).rounded()
-        let contentRect = CGRect(
-            x: padding,
-            y: padding,
-            width: max(2, (outputSize.width - padding * 2).rounded()),
-            height: max(2, (outputSize.height - padding * 2).rounded())
-        )
+        let contentRect = style.contentRect(in: outputSize, contentAspect: contentAspect)
         let radius = min(contentRect.width, contentRect.height) * style.cornerRadius
 
         let mask = CanvasAssets.roundedRect(size: contentRect.size, radius: radius, color: .white)
@@ -179,12 +220,36 @@ final class CanvasAssets: @unchecked Sendable {
                 .cropped(to: CGRect(origin: .zero, size: outputSize))
         }
 
+        let background: CIImage
+        if style.background == .custom, let customImage {
+            background = CanvasAssets.photo(customImage, size: outputSize, blur: style.customBlur)
+        } else {
+            background = CanvasAssets.gradient(style.background, size: outputSize)
+        }
         return Assets(
             contentRect: contentRect,
-            background: baked(CanvasAssets.gradient(style.background, size: outputSize), size: outputSize),
+            background: baked(background, size: outputSize),
             shadow: shadow.map { baked($0, size: outputSize) },
             mask: mask
         )
+    }
+
+    /// An imported image aspect-filled over the canvas, optionally softened
+    /// so it reads as a backdrop rather than competing with the recording.
+    private static func photo(_ cgImage: CGImage, size: CGSize, blur: Double) -> CIImage {
+        let canvas = CGRect(origin: .zero, size: size)
+        let image = CIImage(cgImage: cgImage)
+        let scale = max(size.width / image.extent.width, size.height / image.extent.height)
+        let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let centered = scaled.transformed(by: CGAffineTransform(
+            translationX: (size.width - scaled.extent.width) / 2 - scaled.extent.origin.x,
+            y: (size.height - scaled.extent.height) / 2 - scaled.extent.origin.y
+        ))
+        guard blur > 0.001 else { return centered.cropped(to: canvas) }
+        return centered
+            .clampedToExtent()
+            .applyingGaussianBlur(sigma: min(size.width, size.height) * 0.05 * blur)
+            .cropped(to: canvas)
     }
 
     /// Renders a recipe to pixels once so per-frame compositing is a plain

@@ -64,6 +64,8 @@ final class PreviewSource {
 }
 
 final class PreviewMetalView: MTKView, MTKViewDelegate {
+    override var isFlipped: Bool { true }
+
     private let source: PreviewSource
     private let renderer: MetalFrameRenderer?
     private var lastPixelBuffer: CVPixelBuffer?
@@ -140,7 +142,8 @@ final class PreviewMetalView: MTKView, MTKViewDelegate {
             time: time,
             outputSize: drawableSize,
             cursor: source.cursor.renderer,
-            canvas: source.canvas.style
+            canvas: source.canvas.style,
+            canvasImage: source.canvas.image
         )
 
         guard let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }

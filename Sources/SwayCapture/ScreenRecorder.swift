@@ -168,8 +168,15 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.frameRate))
         configuration.queueDepth = 8
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
+        // Tag frames so nothing between the display and the encoder guesses
+        // at gamma or primaries; the writer tags its output to match.
+        configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.showsCursor = false
         configuration.capturesAudio = options.capturesSystemAudio
+        if #available(macOS 14.0, *) {
+            // `.automatic` may capture below the display's backing resolution.
+            configuration.captureResolution = .best
+        }
         if #available(macOS 14.0, *), options.region != nil, case .display = options.target {
             // sourceRect is display-local, with the display's own origin.
             configuration.sourceRect = CGRect(
@@ -252,18 +259,49 @@ public final class ScreenRecorder: NSObject, @unchecked Sendable {
         }
     }
 
+    /// sRGB-primaries, Rec. 709 matrix - what a display capture is, and what
+    /// QuickTime tags its own screen recordings with.
+    static let sRGBColorProperties: [String: Any] = [
+        AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+        AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+        AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+    ]
+
     private func setUpWriter(width: Int, height: Int) throws {
         try? FileManager.default.removeItem(at: outputURL)
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
 
+        // This movie is an intermediate that the exporter re-encodes, so it
+        // is kept well above delivery quality: text and UI edges must survive
+        // two encodes without looking softer than a native screen recording.
+        // The average rate is per second, and ScreenCaptureKit only delivers
+        // frames when the screen changes, so static content gets very
+        // generous per-frame budgets while fast motion still has headroom.
+        //
+        // No `AVVideoExpectedSourceFrameRateKey`: the encoder would divide the
+        // budget by 60 even though a static screen yields ~10 frames/s, which
+        // starves exactly the frames (text, UI) that need the bits.
+        let bitsPerPixelPerFrame = 0.16
+        let bitRate = min(
+            120_000_000,
+            max(24_000_000, Int(Double(width * height * options.frameRate) * bitsPerPixelPerFrame))
+        )
+        var compression: [String: Any] = [
+            AVVideoAverageBitRateKey: bitRate,
+            AVVideoMaxKeyFrameIntervalKey: options.frameRate * 2,
+            // Real-time capture: no B-frame lookahead, so nothing is held back.
+            AVVideoAllowFrameReorderingKey: false
+        ]
+        if options.codec == .h264 {
+            compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+            compression[AVVideoH264EntropyModeKey] = AVVideoH264EntropyModeCABAC
+        }
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: options.codec,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: max(8_000_000, width * height * options.frameRate / 12),
-                AVVideoMaxKeyFrameIntervalKey: options.frameRate * 2
-            ]
+            AVVideoCompressionPropertiesKey: compression,
+            AVVideoColorPropertiesKey: ScreenRecorder.sRGBColorProperties
         ]
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
