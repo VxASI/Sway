@@ -26,19 +26,16 @@ public final class MetalFrameRenderer {
     /// Draws `image` (whose extent starts at the origin) to fill `texture`,
     /// oriented so that CoreImage's bottom-left origin lands correctly in the
     /// texture's top-left-origin space.
-    public func render(_ image: CIImage, to texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
+    public func render(_ image: CIImage, to texture: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
         let bounds = CGRect(x: 0, y: 0, width: texture.width, height: texture.height)
         // CIContext writes image row 0 (bottom) into texture row 0 (top), so
         // flip vertically about the texture's midline.
         let flipped = image.transformed(by: CGAffineTransform(scaleX: 1, y: -1))
             .transformed(by: CGAffineTransform(translationX: 0, y: CGFloat(texture.height)))
-        context.render(
-            flipped,
-            to: texture,
-            commandBuffer: commandBuffer,
-            bounds: bounds,
-            colorSpace: colorSpace
-        )
+        let destination = CIRenderDestination(mtlTexture: texture, commandBuffer: commandBuffer)
+        destination.isFlipped = false
+        destination.colorSpace = colorSpace
+        try context.startTask(toRender: flipped, from: bounds, to: destination, at: .zero)
     }
 
     /// Convenience for callers that just want the pixels: renders into a new
@@ -50,7 +47,11 @@ public final class MetalFrameRenderer {
         descriptor.usage = [.shaderWrite, .shaderRead]
         guard let texture = device.makeTexture(descriptor: descriptor),
               let commandBuffer = commandQueue.makeCommandBuffer() else { return nil }
-        render(image, to: texture, commandBuffer: commandBuffer)
+        do {
+            try render(image, to: texture, commandBuffer: commandBuffer)
+        } catch {
+            return nil
+        }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         return texture

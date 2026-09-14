@@ -145,7 +145,11 @@ final class PreviewMetalView: MTKView, MTKViewDelegate {
         )
 
         guard let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }
-        renderer.render(image, to: drawable.texture, commandBuffer: commandBuffer)
+        do {
+            try renderer.render(image, to: drawable.texture, commandBuffer: commandBuffer)
+        } catch {
+            return
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
