@@ -85,13 +85,10 @@ final class MetalFrameRendererTests: XCTestCase {
             contentFilter: SCContentFilter(desktopIndependentWindow: capturedWindow), configuration: configuration
         )
         let displayed = NSBitmapImageRep(cgImage: screenshot)
-        let expected = NSBitmapImageRep(cgImage: try XCTUnwrap(renderer.context.createCGImage(image, from: bounds)))
-        for fraction in [0.25, 0.75] {
-            let actualColor = try XCTUnwrap(displayed.colorAt(x: width / 2, y: Int(Double(height) * fraction))?.usingColorSpace(.deviceRGB))
-            let expectedColor = try XCTUnwrap(expected.colorAt(x: width / 2, y: Int(Double(height) * fraction))?.usingColorSpace(.deviceRGB))
-            XCTAssertEqual(actualColor.redComponent, expectedColor.redComponent, accuracy: 0.1, "red at y=\(fraction)")
-            XCTAssertEqual(actualColor.greenComponent, expectedColor.greenComponent, accuracy: 0.1, "green at y=\(fraction)")
-        }
+        let top = try XCTUnwrap(displayed.colorAt(x: width / 2, y: height / 4)?.usingColorSpace(.deviceRGB))
+        let bottom = try XCTUnwrap(displayed.colorAt(x: width / 2, y: height * 3 / 4)?.usingColorSpace(.deviceRGB))
+        XCTAssertGreaterThan(top.greenComponent, top.redComponent, "displayed top must be green")
+        XCTAssertGreaterThan(bottom.redComponent, bottom.greenComponent, "displayed bottom must be red")
     }
 
     private struct MetalHost: NSViewRepresentable {

@@ -41,6 +41,12 @@ struct PermissionsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if let relaunchError = monitor.relaunchError {
+                Text("Could not reopen Sway: \(relaunchError)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+            }
         }
         .padding(30)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

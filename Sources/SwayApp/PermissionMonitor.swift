@@ -25,6 +25,7 @@ final class PermissionMonitor: ObservableObject {
     @Published private(set) var status: [CapturePermissions.Permission: Status] = [:]
     @Published private(set) var isChecking = false
     @Published private(set) var isRequesting: Set<CapturePermissions.Permission> = []
+    @Published private(set) var relaunchError: String?
 
     /// Sticky record of "this permission was missing at some point during this
     /// launch", which is the only way to tell a fresh grant from an old one.
@@ -119,13 +120,27 @@ final class PermissionMonitor: ObservableObject {
     /// Quits and reopens Sway, which is the only way a new Screen Recording
     /// grant starts working.
     func relaunch() {
+        relaunchError = nil
+        let currentPID = ProcessInfo.processInfo.processIdentifier
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
+        configuration.activates = true
         NSWorkspace.shared.openApplication(
             at: Bundle.main.bundleURL,
             configuration: configuration
-        ) { _, _ in
-            Task { @MainActor in NSApp.terminate(nil) }
+        ) { application, error in
+            Task { @MainActor in
+                guard let application,
+                      application.processIdentifier != currentPID,
+                      error == nil else {
+                    let message = error?.localizedDescription ?? "macOS did not start a new Sway process."
+                    self.relaunchError = message
+                    self.log.error("relaunch failed: \(message, privacy: .public)")
+                    return
+                }
+                application.activate(options: [.activateAllWindows])
+                NSApp.terminate(nil)
+            }
         }
     }
 }
