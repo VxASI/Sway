@@ -50,6 +50,56 @@ final class RecordingControlPanel {
 }
 
 @MainActor
+final class RecordingStatusItem: NSObject {
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let elapsedItem = NSMenuItem(title: "Recording 00:00", action: nil, keyEquivalent: "")
+    private let onStop: () -> Void
+    private let onShow: () -> Void
+
+    init(onStop: @escaping () -> Void, onShow: @escaping () -> Void) {
+        self.onStop = onStop
+        self.onShow = onShow
+        super.init()
+
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "Sway is recording")
+            button.contentTintColor = .systemRed
+            button.toolTip = "Sway is recording"
+        }
+
+        elapsedItem.isEnabled = false
+        let stopItem = NSMenuItem(title: "Stop Recording", action: #selector(stopRecording), keyEquivalent: "s")
+        stopItem.keyEquivalentModifierMask = [.command, .shift]
+        stopItem.target = self
+        let showItem = NSMenuItem(title: "Show Sway", action: #selector(showSway), keyEquivalent: "")
+        showItem.target = self
+        let menu = NSMenu()
+        menu.addItem(elapsedItem)
+        menu.addItem(.separator())
+        menu.addItem(stopItem)
+        menu.addItem(showItem)
+        statusItem.menu = menu
+    }
+
+    func update(elapsed: TimeInterval) {
+        let total = Int(elapsed.rounded())
+        elapsedItem.title = String(format: "Recording %02d:%02d", total / 60, total % 60)
+    }
+
+    @objc private func stopRecording() {
+        onStop()
+    }
+
+    @objc private func showSway() {
+        onShow()
+    }
+
+    deinit {
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+}
+
+@MainActor
 final class RecordingControlState: ObservableObject {
     @Published var elapsed: TimeInterval = 0
 }

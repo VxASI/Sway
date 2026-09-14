@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
     private let catalog = CaptureSourceCatalog()
     private var session: RecordingSession?
     private var recordingControl: RecordingControlPanel?
+    private var recordingStatusItem: RecordingStatusItem?
     private var countdownPanel: CountdownPanel?
     private var countdownTask: Task<Void, Never>?
     private var timer: AnyCancellable?
@@ -207,13 +208,13 @@ final class AppModel: ObservableObject {
         countdownPanel?.close()
         countdownPanel = nil
         phase = .picking
-        mainWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showMainWindow()
     }
 
     private func beginSession() {
         guard let source = selectedSource else {
             phase = .picking
+            showMainWindow()
             return
         }
         let options = ScreenRecorderOptions(
@@ -234,8 +235,7 @@ final class AppModel: ObservableObject {
                 self.beginRecordingUI()
             } catch {
                 self.session = nil
-                self.mainWindow?.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
+                self.showMainWindow()
                 await self.permissions.refresh()
                 if self.permissions.isReadyToRecord {
                     self.errorMessage = "Could not start recording.\n\n\(error)"
@@ -258,11 +258,13 @@ final class AppModel: ObservableObject {
                 self.session = nil
                 self.editor = EditorModel(result: result)
                 self.phase = .editing
+                self.showMainWindow()
                 self.refreshLibrary()
             } catch {
                 self.session = nil
                 self.errorMessage = "Recording failed.\n\n\(error)"
                 self.phase = .idle
+                self.showMainWindow()
             }
         }
     }
@@ -275,6 +277,10 @@ final class AppModel: ObservableObject {
         let control = RecordingControlPanel { [weak self] in self?.stopRecording() }
         control.show()
         recordingControl = control
+        recordingStatusItem = RecordingStatusItem(
+            onStop: { [weak self] in self?.stopRecording() },
+            onShow: { [weak self] in self?.showMainWindow() }
+        )
 
         hotKey = StopHotKey { [weak self] in self?.stopRecording() }
 
@@ -284,6 +290,7 @@ final class AppModel: ObservableObject {
                 guard let self, let session = self.session else { return }
                 self.elapsed = session.elapsed
                 self.recordingControl?.update(elapsed: self.elapsed)
+                self.recordingStatusItem?.update(elapsed: self.elapsed)
             }
     }
 
@@ -293,8 +300,8 @@ final class AppModel: ObservableObject {
         hotKey = nil
         recordingControl?.close()
         recordingControl = nil
-        mainWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        recordingStatusItem = nil
+        showMainWindow()
     }
 
     // MARK: - Opening
@@ -352,6 +359,13 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private func showMainWindow() {
+        guard let window = mainWindow else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     private var mainWindow: NSWindow? {
         NSApp.windows.first { $0.canBecomeMain && !($0 is NSPanel) }
