@@ -45,8 +45,8 @@ final class AppModel: ObservableObject {
 
     private let catalog = CaptureSourceCatalog()
     private var session: RecordingSession?
-    private var recordingControl: RecordingControlPanel?
     private var recordingStatusItem: RecordingStatusItem?
+    private var recordingMainWindow: NSWindow?
     private var countdownPanel: CountdownPanel?
     private var countdownTask: Task<Void, Never>?
     private var timer: AnyCancellable?
@@ -184,7 +184,8 @@ final class AppModel: ObservableObject {
         thumbnailTask?.cancel()
         isLoadingSources = false
         phase = .countdown
-        mainWindow?.orderOut(nil)
+        recordingMainWindow = mainWindow
+        recordingMainWindow?.orderOut(nil)
 
         let panel = CountdownPanel { [weak self] in self?.cancelCountdown() }
         panel.show(count: 3)
@@ -208,13 +209,13 @@ final class AppModel: ObservableObject {
         countdownPanel?.close()
         countdownPanel = nil
         phase = .picking
-        showMainWindow()
+        showMainWindow(releaseRecordingWindow: true)
     }
 
     private func beginSession() {
         guard let source = selectedSource else {
             phase = .picking
-            showMainWindow()
+            showMainWindow(releaseRecordingWindow: true)
             return
         }
         let options = ScreenRecorderOptions(
@@ -235,7 +236,7 @@ final class AppModel: ObservableObject {
                 self.beginRecordingUI()
             } catch {
                 self.session = nil
-                self.showMainWindow()
+                self.showMainWindow(releaseRecordingWindow: true)
                 await self.permissions.refresh()
                 if self.permissions.isReadyToRecord {
                     self.errorMessage = "Could not start recording.\n\n\(error)"
@@ -250,21 +251,21 @@ final class AppModel: ObservableObject {
     func stopRecording() {
         guard let session, isRecording else { return }
         isRecording = false
-        endRecordingUI()
         phase = .processing
+        endRecordingUI()
         Task {
             do {
                 let result = try await session.stop()
                 self.session = nil
                 self.editor = EditorModel(result: result)
                 self.phase = .editing
-                self.showMainWindow()
+                self.showMainWindow(releaseRecordingWindow: true)
                 self.refreshLibrary()
             } catch {
                 self.session = nil
                 self.errorMessage = "Recording failed.\n\n\(error)"
                 self.phase = .idle
-                self.showMainWindow()
+                self.showMainWindow(releaseRecordingWindow: true)
             }
         }
     }
@@ -272,11 +273,8 @@ final class AppModel: ObservableObject {
     private func beginRecordingUI() {
         // Sway is excluded from the capture, but hiding the main window also
         // keeps it out of the way while the user performs their actions.
-        mainWindow?.orderOut(nil)
+        recordingMainWindow?.orderOut(nil)
 
-        let control = RecordingControlPanel { [weak self] in self?.stopRecording() }
-        control.show()
-        recordingControl = control
         recordingStatusItem = RecordingStatusItem(
             onStop: { [weak self] in self?.stopRecording() },
             onShow: { [weak self] in self?.showMainWindow() }
@@ -289,7 +287,6 @@ final class AppModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self, let session = self.session else { return }
                 self.elapsed = session.elapsed
-                self.recordingControl?.update(elapsed: self.elapsed)
                 self.recordingStatusItem?.update(elapsed: self.elapsed)
             }
     }
@@ -298,8 +295,6 @@ final class AppModel: ObservableObject {
         timer?.cancel()
         timer = nil
         hotKey = nil
-        recordingControl?.close()
-        recordingControl = nil
         recordingStatusItem = nil
         showMainWindow()
     }
@@ -360,11 +355,12 @@ final class AppModel: ObservableObject {
 
     // MARK: - Helpers
 
-    private func showMainWindow() {
-        guard let window = mainWindow else { return }
+    private func showMainWindow(releaseRecordingWindow: Bool = false) {
+        guard let window = recordingMainWindow ?? mainWindow else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if releaseRecordingWindow { recordingMainWindow = nil }
     }
 
     private var mainWindow: NSWindow? {

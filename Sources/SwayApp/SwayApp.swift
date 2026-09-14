@@ -142,7 +142,7 @@ struct RecordingPlaceholderView: View {
         VStack(spacing: 14) {
             Text(model.elapsedLabel)
                 .font(.system(size: 44, weight: .medium, design: .monospaced))
-            Text("Recording. Press ⇧⌘S or use the floating control to stop.")
+            Text("Recording. Press ⇧⌘S or use the menu bar control to stop.")
                 .foregroundStyle(.secondary)
             Button("Stop") { model.stopRecording() }
                 .controlSize(.large)
